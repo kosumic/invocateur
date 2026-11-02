@@ -132,14 +132,16 @@ case "$1 $2" in
   'workspace list')
     if test -f "$FIXTURE/server-down"; then exit 1; fi
     if test -f "$FIXTURE/herdr-list-response.json"; then cat "$FIXTURE/herdr-list-response.json"; exit 0; fi
-    printf '{"id":"ready","result":{"workspaces":[{"workspace_id":"w7","future_field":true}],"future_field":true},"error":null}' ;;
+    printf '{"id":"ready","result":{"workspaces":[{"workspace_id":"w7","future_field":true},{"workspace_id":"wJ"}],"future_field":true},"error":null}' ;;
   'workspace create')
     printf 'workspace\n' >> "$FIXTURE/launches"
     printf '%s\n' "$@" >> "$FIXTURE/workspace-args"
     if test -f "$FIXTURE/herdr-workspace-response.json"; then cat "$FIXTURE/herdr-workspace-response.json"; exit 0; fi
     printf '{"result":{"workspace":{"workspace_id":"w7"},"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"w7:p9"},"future_field":true},"error":null}' ;;
   'tab rename')
-    test "$3" = w7:t1 || exit 2
+    expected_tab=w7:t1
+    if test -f "$FIXTURE/expected-tab"; then read -r expected_tab < "$FIXTURE/expected-tab"; fi
+    test "$3" = "$expected_tab" || exit 2
     printf '%s\n' "$4" >> "$FIXTURE/tab-names"
     if test -f "$FIXTURE/herdr-ack-response.json"; then cat "$FIXTURE/herdr-ack-response.json"; exit 0; fi
     printf '{"result":{}}' ;;
@@ -160,7 +162,13 @@ case "$1 $2" in
     if test -f "$FIXTURE/herdr-json-error"; then printf '{"error":{"code":"agent_blocked","message":"approval pending","future_field":true}}'; exit 1; fi
     if test -f "$FIXTURE/agent-fails"; then echo 'agent_not_ready' >&2; exit 1; fi
     mkdir -p "$FIXTURE/live-agents"
-    printf '{"name":"%s","agent":"%s","agent_status":"idle","pane_id":"w7:p9","future_field":true}' "$3" "$5" > "$FIXTURE/live-agents/$3.json"
+    pane=
+    previous=
+    for value do
+      if test "$previous" = '--pane'; then pane="$value"; fi
+      previous="$value"
+    done
+    printf '{"name":"%s","agent":"%s","agent_status":"idle","pane_id":"%s","future_field":true}' "$3" "$5" "$pane" > "$FIXTURE/live-agents/$3.json"
     printf '{"result":{}}' ;;
   'agent prompt')
     test -f "$FIXTURE/live-agents/$3.json" || exit 2
@@ -2053,5 +2061,55 @@ fn follow_up_acknowledgements_and_prefix_instructions_remain_configurable() {
             "Work on it: https://github.com/alice/project/issues/42#issuecomment-1\n",
             "Work on it: https://github.com/alice/project/issues/42#issuecomment-2\n"
         )
+    );
+}
+
+#[test]
+fn herdr_base32_ids_allow_launches_and_follow_ups_after_restart() {
+    let f = Fixture::new();
+    f.write(
+        "herdr-workspace-response.json",
+        &json!({"result":{
+            "root_pane":{"pane_id":"wM:pA9"},"tab":{"tab_id":"wM:tJ0"}
+        }}),
+    );
+    fs::write(f.root.join("expected-tab"), "wM:tJ0\n").unwrap();
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
+    );
+    f.success();
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 1);
+    assert_eq!(
+        f.state()["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"]["pane"],
+        "wM:pA9"
+    );
+    assert!(
+        fs::read_to_string(f.root.join("start-args"))
+            .unwrap()
+            .contains("wM:pA9")
+    );
+    f.write(
+        "live-agents/gh-i-1.json",
+        &json!({
+            "name":"gh-i-1","agent":"codex","agent_status":"done","pane_id":"w0A:pZ0"
+        }),
+    );
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(2, "alice", "@invo Continue")]]),
+    );
+    f.success();
+    f.success();
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 2);
+    let state = f.state();
+    let record = &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-2"];
+    assert_eq!(record["status"], "forwarded");
+    assert_eq!(record["pane"], "w0A:pZ0");
+    assert_eq!(
+        fs::read_to_string(f.root.join("prompt-targets")).unwrap(),
+        "gh-i-1\ngh-i-1\n"
     );
 }

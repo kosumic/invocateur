@@ -3,14 +3,17 @@ use anyhow::{Result, ensure};
 use serde::Deserialize;
 use std::fmt;
 
-fn digits(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+// Herdr encodes public ID segments with this bijective base-32 alphabet.
+fn id_segment(value: &str) -> bool {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ0";
+    !value.is_empty() && value.bytes().all(|byte| ALPHABET.contains(&byte))
 }
 fn herdr_id(value: &str, kind: char) -> bool {
     let Some((workspace, local)) = value.split_once(':') else {
         return false;
     };
-    workspace.strip_prefix('w').is_some_and(digits) && local.strip_prefix(kind).is_some_and(digits)
+    workspace.strip_prefix('w').is_some_and(id_segment)
+        && local.strip_prefix(kind).is_some_and(id_segment)
 }
 macro_rules! string_id {
     ($name:ident, $description:literal, $valid:expr) => {
@@ -44,7 +47,7 @@ string_id!(HerdrTabId, "Herdr tab ID", |value: &str| herdr_id(
 ));
 string_id!(HerdrWorkspaceId, "Herdr workspace ID", |value: &str| value
     .strip_prefix('w')
-    .is_some_and(digits));
+    .is_some_and(id_segment));
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchTarget {
     HerdrPane(HerdrPaneId),

@@ -3,7 +3,9 @@
 Invocateur supports Herdr only, using typed Rust request and response models over
 its public CLI. The common launch boundary is `LaunchRequest` → `LaunchResponse`,
 with a validated Herdr pane ID in `LaunchTarget`. Pane, tab, and workspace IDs
-have distinct Rust types and cannot be interchanged.
+have distinct Rust types and cannot be interchanged. Identifier segments use
+Herdr's base-32 alphabet, including uppercase letters: `wJ`, `wM:pA9`, and
+`wM:tJ0` are valid. Treat these handles as opaque rather than decimal counters.
 
 | Requests | Responses |
 | --- | --- |
