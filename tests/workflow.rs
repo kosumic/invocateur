@@ -349,7 +349,10 @@ fn own_mentions_only_paginated_and_deduplicated_across_restarts() {
     );
     assert_eq!(f.acknowledgements(), 1);
     let ack = fs::read_to_string(f.root.join("ack-1.txt")).unwrap();
-    assert!(ack.contains("Invocateur started codex") && ack.contains("#issuecomment-6"));
+    assert!(
+        ack.contains("[Invocateur](https://github.com/kosumic/invocateur) started codex")
+            && ack.contains("#issuecomment-6")
+    );
     assert_eq!(
         f.state()["repositories"]["github.com/alice/alice/project"]["launches"]["i-6"]["acknowledgement_url"],
         "https://github.com/alice/project/issues/42#issuecomment-ack-1"

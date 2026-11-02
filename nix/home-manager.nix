@@ -139,7 +139,7 @@ in {
     };
     acknowledgementMessage = mkOption {
       type = types.str;
-      default = "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}.";
+      default = "🪄 [Invocateur](https://github.com/kosumic/invocateur) started {agent} for this task.\n\nTriggered by {comment_url}.";
       description = "Comment posted after successfully starting an agent. Supports {agent}, {comment_url}, {repository}, {issue_number}, {multiplexer}, and {session}.";
     };
     reposDirectory = mkOption {

@@ -71,7 +71,7 @@ impl Default for Config {
             agent_args: vec![],
             prefix_github_comments: true,
             acknowledgement_message:
-                "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}.".into(),
+                "🪄 [Invocateur](https://github.com/kosumic/invocateur) started {agent} for this task.\n\nTriggered by {comment_url}.".into(),
             repos_directory: "~/repos".into(),
             repositories: BTreeMap::new(),
             discover_repositories: true,

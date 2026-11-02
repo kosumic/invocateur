@@ -33,7 +33,7 @@ agent = "codex"
 prefix_github_comments = true
 repos_directory = "~/repos"
 poll_interval_seconds = 60
-acknowledgement_message = "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}."
+acknowledgement_message = "🪄 [Invocateur](https://github.com/kosumic/invocateur) started {agent} for this task.\n\nTriggered by {comment_url}."
 ```
 
 These are the defaults; all settings are optional in the TOML file. Standalone
@@ -195,7 +195,7 @@ services.invocateur = {
   agent = "codex";
   agentArgs = [];
   prefixGithubComments = true;
-  acknowledgementMessage = "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}.";
+  acknowledgementMessage = "🪄 [Invocateur](https://github.com/kosumic/invocateur) started {agent} for this task.\n\nTriggered by {comment_url}.";
   reposDirectory = "${config.home.homeDirectory}/repos";
   pollInterval = 60; # seconds between completed polls
   discoverGithubRepositories = true;
@@ -225,7 +225,7 @@ After successfully starting an agent and submitting its task, Invocateur posts a
 new comment on the issue or PR. The default message is:
 
 ```text
-🪄 Invocateur started codex for this task.
+🪄 [Invocateur](https://github.com/kosumic/invocateur) started codex for this task.
 
 Triggered by https://github.com/owner/repo/issues/42#issuecomment-123.
 ```
