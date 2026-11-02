@@ -6,6 +6,7 @@
 }: let
   cfg = config.services.invocateur;
   inherit (lib) mkEnableOption mkIf mkOption types;
+  needsAgents = cfg.githubEnabled || lib.any (task: task.enable && task.prompt != null) cfg.scheduledTasks;
   multiplexerPackage =
     if cfg.multiplexer == "herdr"
     then cfg.herdrPackage
@@ -14,6 +15,19 @@
     else cfg.zellijPackage;
   settings = {
     inherit (cfg) agent repositories multiplexer;
+    github_enabled = cfg.githubEnabled;
+    schedule_check_interval_seconds = cfg.scheduleCheckInterval;
+    scheduled_tasks = map (task:
+      lib.filterAttrs (_: value: value != null) {
+        inherit (task) name cron timezone directory prompt command;
+        enabled = task.enable;
+        every_seconds = task.everySeconds;
+        run_on_startup = task.runOnStartup;
+        timeout_seconds = task.commandTimeout;
+        workspace_name = task.workspaceName;
+        tab_name = task.tabName;
+      })
+    cfg.scheduledTasks;
     bot_name = cfg.botName;
     use_hostname_as_bot_name = cfg.useHostnameAsBotName;
     workspace_name = cfg.workspaceName;
@@ -31,17 +45,20 @@
     tmux_session = cfg.tmuxSession;
     zellij_session = cfg.zellijSession;
     github_host = cfg.githubHost;
-    gh_path = lib.getExe pkgs.gh;
+    gh_path =
+      if cfg.githubEnabled
+      then lib.getExe pkgs.gh
+      else "gh";
     herdr_path =
-      if cfg.multiplexer == "herdr"
+      if needsAgents && cfg.multiplexer == "herdr"
       then lib.getExe multiplexerPackage
       else "herdr";
     tmux_path =
-      if cfg.multiplexer == "tmux"
+      if needsAgents && cfg.multiplexer == "tmux"
       then lib.getExe multiplexerPackage
       else "tmux";
     zellij_path =
-      if cfg.multiplexer == "zellij"
+      if needsAgents && cfg.multiplexer == "zellij"
       then lib.getExe multiplexerPackage
       else "zellij";
     git_path = lib.getExe pkgs.git;
@@ -50,7 +67,84 @@
   configFile = (pkgs.formats.toml {}).generate "invocateur.toml" settings;
 in {
   options.services.invocateur = {
-    enable = mkEnableOption "GitHub bot mentions that start coding agents in a terminal multiplexer";
+    enable = mkEnableOption "Invocateur triggers and scheduled tasks";
+    githubEnabled = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Enable the GitHub comment trigger. Disable for schedules without GitHub.";
+    };
+    scheduleCheckInterval = mkOption {
+      type = types.ints.positive;
+      default = 1;
+      description = "Seconds between scheduled-task checks, independent of GitHub pollInterval.";
+    };
+    scheduledTasks = mkOption {
+      default = [];
+      description = "Machine-local cron or interval tasks. Each runs an agent prompt or command argv.";
+      type = types.listOf (types.submodule {
+        options = {
+          name = mkOption {
+            type = types.str;
+            description = "Unique task identity, using 1–64 letters, digits, underscores, or hyphens.";
+          };
+          enable = mkOption {
+            type = types.bool;
+            default = true;
+            description = "Enable this scheduled task.";
+          };
+          cron = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = "Cron expression; configure this or everySeconds.";
+          };
+          everySeconds = mkOption {
+            type = types.nullOr types.ints.positive;
+            default = null;
+            description = "Interval between completed runs; configure this or cron.";
+          };
+          timezone = mkOption {
+            type = types.str;
+            default = "UTC";
+            description = "IANA timezone for cron, such as America/New_York.";
+          };
+          directory = mkOption {
+            type = types.str;
+            default = cfg.reposDirectory;
+            description = "Existing task working directory, absolute or starting with ~/.";
+          };
+          prompt = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = "Agent prompt, using the configured agent and multiplexer. Configure this or command.";
+          };
+          command = mkOption {
+            type = types.listOf types.str;
+            default = [];
+            description = "Command and arguments, passed literally without a shell. Configure this or prompt.";
+          };
+          runOnStartup = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Run immediately the first time this task name is seen; restarts retain its schedule.";
+          };
+          commandTimeout = mkOption {
+            type = types.nullOr types.ints.positive;
+            default = null;
+            description = "Command timeout, defaulting to the service commandTimeout.";
+          };
+          workspaceName = mkOption {
+            type = types.str;
+            default = "{task_name} {scheduled_at}";
+            description = "Agent workspace template: {task_name}, {scheduled_at}, {agent_name}, {agent}, {multiplexer}, {session}.";
+          };
+          tabName = mkOption {
+            type = types.str;
+            default = "{agent_name}";
+            description = "Agent tab/window template, with the same placeholders as workspaceName.";
+          };
+        };
+      });
+    };
     multiplexer = mkOption {
       type = types.enum ["herdr" "tmux" "zellij"];
       default = "herdr";
@@ -177,8 +271,8 @@ in {
     };
     extraPackages = mkOption {
       type = types.listOf types.package;
-      default = [pkgs.codex];
-      description = "Agent executables available to the service. Herdr also needs its agent executable in the server's environment.";
+      default = lib.optionals needsAgents [pkgs.codex];
+      description = "Agent and task command executables available to the service. Defaults to Codex when agent tasks are enabled. Herdr also needs its agent executable in the server's environment.";
     };
   };
 
@@ -194,11 +288,11 @@ in {
       }
     ];
 
-    home.packages = [cfg.package multiplexerPackage];
+    home.packages = [cfg.package] ++ lib.optional needsAgents multiplexerPackage;
     xdg.configFile."invocateur/config.toml".source = configFile;
 
     systemd.user.services.invocateur = {
-      Unit.Description = "Summon coding agents from GitHub comments";
+      Unit.Description = "Run Invocateur triggers and scheduled tasks";
       Service = {
         ExecStart = "${lib.getExe cfg.package} --config ${configFile} --state-dir %S/invocateur";
         Restart = "on-failure";
@@ -208,7 +302,7 @@ in {
         WorkingDirectory = config.home.homeDirectory;
         Environment = [
           "XDG_CONFIG_HOME=${config.xdg.configHome}"
-          "PATH=${lib.makeBinPath ([pkgs.gh pkgs.git multiplexerPackage] ++ cfg.extraPackages)}:${config.home.profileDirectory}/bin:${config.home.homeDirectory}/.local/bin:${config.home.homeDirectory}/.nix-profile/bin:/run/current-system/sw/bin"
+          "PATH=${lib.makeBinPath ([pkgs.git] ++ lib.optional cfg.githubEnabled pkgs.gh ++ lib.optional needsAgents multiplexerPackage ++ cfg.extraPackages)}:${config.home.profileDirectory}/bin:${config.home.homeDirectory}/.local/bin:${config.home.homeDirectory}/.nix-profile/bin:/run/current-system/sw/bin"
         ];
       };
       Install.WantedBy = ["default.target"];

@@ -5,6 +5,7 @@ use std::{
     env,
     fs::{self, OpenOptions},
     io::Read,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -19,6 +20,9 @@ use triggers::github::valid_repo;
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Config {
+    github_enabled: bool,
+    scheduled_tasks: Vec<triggers::schedule::Task>,
+    schedule_check_interval_seconds: u64,
     multiplexer: Multiplexer,
     workspace_name: String,
     tab_name: String,
@@ -50,6 +54,9 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            github_enabled: true,
+            scheduled_tasks: vec![],
+            schedule_check_interval_seconds: 1,
             multiplexer: Multiplexer::Herdr,
             workspace_name: "{repository}#{issue_number} {agent_name}".into(),
             tab_name: "{agent_name}".into(),
@@ -153,6 +160,15 @@ impl Config {
             );
             *path = expand_home(path)?;
         }
+        ensure!(
+            cfg.schedule_check_interval_seconds > 0,
+            "schedule check interval must be positive"
+        );
+        triggers::schedule::validate(
+            &mut cfg.scheduled_tasks,
+            &cfg.repos_directory,
+            cfg.command_timeout_seconds,
+        )?;
         Ok(cfg)
     }
 }
@@ -175,7 +191,21 @@ fn expand_home(path: &Path) -> Result<PathBuf> {
 
 // Capture both streams concurrently: a full stdout pipe must not deadlock a paginated gh request.
 fn run(program: &str, args: &[String], timeout: u64) -> Result<String> {
-    let mut child = Command::new(program)
+    run_in_directory(program, args, timeout, None)
+}
+
+fn run_in_directory(
+    program: &str,
+    args: &[String],
+    timeout: u64,
+    directory: Option<&Path>,
+) -> Result<String> {
+    let mut command = Command::new(program);
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+    let mut child = command
+        .process_group(0)
         .args(args)
         .env("GH_PROMPT_DISABLED", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -210,6 +240,10 @@ fn run(program: &str, args: &[String], timeout: u64) -> Result<String> {
             break status;
         }
         if Instant::now() >= deadline {
+            // This process group contains only the CLI we started and its descendants.
+            unsafe {
+                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+            }
             let _ = child.kill();
             let _ = child.wait();
             bail!("{program} timed out after {timeout}s; a mutation may already have applied");
@@ -268,7 +302,7 @@ fn main() -> Result<()> {
             "--check-config" => check = true,
             "--help" | "-h" => {
                 println!(
-                    "invocateur --config FILE [--state-dir DIRECTORY] [--once | --check-config]\n\nPoll your GitHub comments and start coding agents in Herdr, tmux, or Zellij. Config format: TOML."
+                    "invocateur --config FILE [--state-dir DIRECTORY] [--once | --check-config]\n\nRun GitHub comment triggers and scheduled agent or command tasks. Config format: TOML."
                 );
                 return Ok(());
             }
@@ -277,7 +311,17 @@ fn main() -> Result<()> {
     }
     let cfg = Config::load(&config_path.context("--config is required")?)?;
     if check {
-        println!("configuration is valid (trigger: @{})", cfg.bot_name);
+        println!("configuration is valid");
+        if cfg.github_enabled {
+            println!("GitHub trigger: @{}", cfg.bot_name);
+        }
+        println!(
+            "{} scheduled task(s)",
+            cfg.scheduled_tasks
+                .iter()
+                .filter(|task| task.enabled)
+                .count()
+        );
         return Ok(());
     }
     let state_dir = expand_home(&state_dir.unwrap_or_else(|| {
@@ -294,14 +338,24 @@ fn main() -> Result<()> {
         .open(state_dir.join("lock"))?;
     lock.try_lock()
         .context("another invocateur instance is using this state directory")?;
-    let mut active_triggers: Vec<Box<dyn triggers::Trigger + '_>> = vec![Box::new(
-        triggers::github::GithubTrigger::new(&cfg, &state_dir)?,
-    )];
+    let mut active_triggers = vec![];
+    if cfg.github_enabled {
+        active_triggers.push(triggers::Registration::new(
+            Box::new(triggers::github::GithubTrigger::new(&cfg, &state_dir)?),
+            Duration::from_secs(cfg.poll_interval_seconds),
+        ));
+    }
+    if cfg.scheduled_tasks.iter().any(|task| task.enabled) {
+        active_triggers.push(triggers::Registration::new(
+            Box::new(triggers::schedule::ScheduleTrigger::new(&cfg, &state_dir)?),
+            Duration::from_secs(cfg.schedule_check_interval_seconds),
+        ));
+    }
     loop {
         let result = triggers::poll_all(&mut active_triggers);
         if once {
             return result;
         }
-        thread::sleep(Duration::from_secs(cfg.poll_interval_seconds));
+        thread::sleep(triggers::next_delay(&active_triggers));
     }
 }

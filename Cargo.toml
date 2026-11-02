@@ -9,6 +9,9 @@ description = "Summon coding agents from your GitHub comments"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 hostname = "0.4"
+chrono-tz = "0.10"
+croner = "4"
+libc = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

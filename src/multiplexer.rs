@@ -63,13 +63,18 @@ pub fn names(
     ];
     let workspace = render_template(&cfg.workspace_name, &values);
     let tab = render_template(&cfg.tab_name, &values);
-    for label in [&workspace, &tab] {
+    validate_names(&workspace, &tab)?;
+    Ok((workspace, tab))
+}
+
+pub fn validate_names(workspace: &str, tab: &str) -> Result<()> {
+    for label in [workspace, tab] {
         ensure!(
             !label.trim().is_empty() && label.len() <= 256 && !label.chars().any(char::is_control),
             "rendered workspace and tab names must be nonempty, single-line, and at most 256 UTF-8 bytes"
         );
     }
-    Ok((workspace, tab))
+    Ok(())
 }
 
 fn agent_executable(cfg: &Config) -> Result<PathBuf> {

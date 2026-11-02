@@ -70,6 +70,7 @@ for arg do
       printf '%s\n' "$4" >> "$FIXTURE/clones"
       exit 0 ;;
     user)
+      printf 'user\n' >> "$FIXTURE/user-calls"
       if test -f "$FIXTURE/gh-logged-out"; then
         echo 'not logged in; run gh auth login' >&2
         exit 1
@@ -149,6 +150,16 @@ case "$1 $2" in
 esac
 "#,
             ),
+            ("scheduled-command", r#"
+printf 'run\n' >> "$FIXTURE/scheduled-runs"
+printf '%s\0' "$@" > "$FIXTURE/scheduled-argv"
+printf '%s\n' "$PWD" > "$FIXTURE/scheduled-cwd"
+case "${1:-}" in
+  fail) echo 'scheduled task failed' >&2; exit 1 ;;
+  wait) printf '%s\n' "$$" > "$FIXTURE/scheduled-pid"; sleep 30 ;;
+esac
+printf 'scheduled output\n'
+"#),
             ("agent", r#"
 printf '%s\0' "$@" > "$FIXTURE/agent-argv"
 printf '%s\n' "$PWD" > "$FIXTURE/agent-cwd"
@@ -1244,4 +1255,301 @@ fn github_trigger_skips_missing_cli_or_login_then_recovers_without_restarting() 
         assert_eq!(f.launches(), 1);
         assert!(daemon.0.try_wait().unwrap().is_none());
     }
+}
+
+fn scheduled_command(f: &Fixture, name: &str) -> Value {
+    json!({"name":name, "every_seconds":3600, "directory":f.root.join("checkout"),
+        "run_on_startup":true, "command":[MOCK_TOOLS.get().unwrap().join("scheduled-command")]})
+}
+fn schedule_state(f: &Fixture) -> Value {
+    serde_json::from_slice(&fs::read(f.root.join("state/schedules.json")).unwrap()).unwrap()
+}
+fn scheduled_runs(f: &Fixture) -> usize {
+    fs::read_to_string(f.root.join("scheduled-runs"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+#[test]
+fn scheduled_commands_use_literal_argv_and_directory_without_github_or_a_multiplexer() {
+    let f = Fixture::new();
+    let directory = f.root.join("plain-directory");
+    fs::create_dir(&directory).unwrap();
+    let injected = f.root.join("must-not-exist");
+    let literal = format!(
+        "$(touch {}) `touch {}` ' \" $HOME ;",
+        injected.display(),
+        injected.display()
+    );
+    let mut task = scheduled_command(&f, "command-task");
+    task["directory"] = json!(directory);
+    task["command"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("--message"), json!(literal)]);
+    f.config(json!({"github_enabled":false, "gh_path":"/missing/gh", "herdr_path":"/missing/herdr", "scheduled_tasks":[task]}));
+    f.success();
+    f.success();
+    assert_eq!(
+        scheduled_runs(&f),
+        1,
+        "restart replayed a dispatched occurrence"
+    );
+    assert!(!injected.exists());
+    assert!(!f.root.join("user-calls").exists());
+    assert_eq!(
+        fs::read_to_string(f.root.join("scheduled-cwd"))
+            .unwrap()
+            .trim(),
+        directory.to_str().unwrap()
+    );
+    let bytes = fs::read(f.root.join("scheduled-argv")).unwrap();
+    let argv: Vec<_> = bytes
+        .split(|b| *b == 0)
+        .filter(|item| !item.is_empty())
+        .map(|item| std::str::from_utf8(item).unwrap())
+        .collect();
+    assert_eq!(argv, ["--message", literal.as_str()]);
+    assert_eq!(
+        schedule_state(&f)["jobs"]["command-task"]["last_run"]["status"],
+        "succeeded"
+    );
+}
+
+#[test]
+fn scheduled_agent_tasks_use_the_configured_agent_and_names_without_github() {
+    let f = Fixture::new();
+    f.config(
+        json!({"github_enabled":false, "agent":"claude", "scheduled_tasks":[{
+            "name":"review", "every_seconds":3600, "run_on_startup":true,
+            "directory":f.root.join("checkout"), "prompt":"Review the changes; keep $HOME literal.",
+            "workspace_name":"Scheduled {task_name}", "tab_name":"job-{task_name}"
+        }]}),
+    );
+    f.success();
+    f.success();
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 0);
+    assert!(!f.root.join("user-calls").exists());
+    assert!(
+        fs::read_to_string(f.root.join("start-args"))
+            .unwrap()
+            .contains("claude\n")
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("tab-names")).unwrap(),
+        "job-review\n"
+    );
+    assert!(
+        fs::read_to_string(f.root.join("workspace-args"))
+            .unwrap()
+            .contains("Scheduled review")
+    );
+    assert!(
+        fs::read_to_string(f.root.join("prompts"))
+            .unwrap()
+            .contains("Review the changes; keep $HOME literal.")
+    );
+    let state = schedule_state(&f);
+    assert_eq!(state["jobs"]["review"]["last_run"]["status"], "started");
+    assert_eq!(state["jobs"]["review"]["last_run"]["pane"], "w7:p9");
+}
+
+#[test]
+fn scheduled_work_continues_when_github_is_unavailable_and_other_jobs_fail() {
+    let f = Fixture::new();
+    let mut failed = scheduled_command(&f, "fails");
+    failed["command"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("fail"));
+    f.config(json!({"gh_path":"/missing/gh", "scheduled_tasks":[failed, scheduled_command(&f, "healthy")]}));
+    let output = f.run();
+    assert!(!output.status.success());
+    assert_eq!(scheduled_runs(&f), 2);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("trigger github: skipping poll"));
+    let state = schedule_state(&f);
+    assert_eq!(state["jobs"]["fails"]["last_run"]["status"], "failed");
+    assert_eq!(state["jobs"]["healthy"]["last_run"]["status"], "succeeded");
+    assert!(!f.run().status.success());
+    assert_eq!(
+        scheduled_runs(&f),
+        2,
+        "one-shot retry replayed completed task occurrences"
+    );
+}
+
+#[test]
+fn new_schedules_wait_for_their_first_due_time_and_disabled_tasks_do_not_run() {
+    let f = Fixture::new();
+    let mut future = scheduled_command(&f, "future");
+    future["run_on_startup"] = json!(false);
+    let mut disabled = scheduled_command(&f, "disabled");
+    disabled["enabled"] = json!(false);
+    f.config(json!({"github_enabled":false, "scheduled_tasks":[future, disabled]}));
+    f.success();
+    f.success();
+    assert_eq!(scheduled_runs(&f), 0);
+    let state = schedule_state(&f);
+    assert!(state["jobs"]["future"]["next_run"].as_str().is_some());
+    assert!(state["jobs"].get("disabled").is_none());
+}
+
+#[test]
+fn invalid_schedules_fail_configuration_checks_without_starting_tasks() {
+    let f = Fixture::new();
+    for task in [
+        json!({"name":"missing-time", "command":["true"]}),
+        json!({"name":"both-times", "cron":"0 9 * * *", "every_seconds":60, "command":["true"]}),
+        json!({"name":"bad-cron", "cron":"not a cron", "command":["true"]}),
+        json!({"name":"bad-zone", "cron":"0 9 * * *", "timezone":"Wrong/Zone", "command":["true"]}),
+        json!({"name":"zero", "every_seconds":0, "command":["true"]}),
+        json!({"name":"missing-action", "every_seconds":60}),
+        json!({"name":"both-actions", "every_seconds":60, "prompt":"Review", "command":["true"]}),
+    ] {
+        f.config(json!({"github_enabled":false, "scheduled_tasks":[task]}));
+        assert!(
+            !f.command("state")
+                .arg("--check-config")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    let task = scheduled_command(&f, "duplicate");
+    f.config(json!({"scheduled_tasks":[task.clone(), task]}));
+    assert!(
+        !f.command("state")
+            .arg("--check-config")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(scheduled_runs(&f), 0);
+    assert_eq!(f.launches(), 0);
+}
+
+struct ScheduleDaemon(std::process::Child);
+impl Drop for ScheduleDaemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn schedule_daemon(f: &Fixture) -> ScheduleDaemon {
+    ScheduleDaemon(
+        Command::new(env!("CARGO_BIN_EXE_invocateur"))
+            .arg("--config")
+            .arg(f.root.join("config.toml"))
+            .arg("--state-dir")
+            .arg(f.root.join("state"))
+            .env("FIXTURE", &f.root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn interval_schedules_repeat_without_increasing_github_poll_frequency() {
+    let f = Fixture::new();
+    let mut task = scheduled_command(&f, "repeat");
+    task["every_seconds"] = json!(1);
+    f.config(json!({"poll_interval_seconds":60, "scheduled_tasks":[task]}));
+    let mut daemon = schedule_daemon(&f);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if scheduled_runs(&f) >= 2
+            && let Ok(bytes) = fs::read(f.root.join("state/schedules.json"))
+            && let Ok(state) = serde_json::from_slice::<Value>(&bytes)
+            && state["jobs"]["repeat"]["last_run"]["status"] == "succeeded"
+        {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        assert!(daemon.0.try_wait().unwrap().is_none());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        fs::read_to_string(f.root.join("user-calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn interrupted_scheduled_dispatch_is_not_replayed_after_restart() {
+    let f = Fixture::new();
+    let mut task = scheduled_command(&f, "interrupted");
+    task["command"].as_array_mut().unwrap().push(json!("wait"));
+    f.config(json!({"github_enabled":false, "scheduled_tasks":[task.clone()]}));
+    let mut daemon = schedule_daemon(&f);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let pid: i32 = loop {
+        if let Ok(text) = fs::read_to_string(f.root.join("scheduled-pid"))
+            && let Ok(pid) = text.trim().parse()
+        {
+            break pid;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        assert!(daemon.0.try_wait().unwrap().is_none());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    daemon.0.kill().unwrap();
+    daemon.0.wait().unwrap();
+    // The PID was written by this test's mock command in its private process group.
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+    f.config(
+        json!({"github_enabled":false, "scheduled_tasks":[task, scheduled_command(&f, "other")]}),
+    );
+    let output = f.run();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("previous dispatch needs attention"));
+    assert_eq!(scheduled_runs(&f), 2, "interrupted command was replayed");
+    assert_eq!(
+        schedule_state(&f)["jobs"]["other"]["last_run"]["status"],
+        "succeeded"
+    );
+}
+
+#[test]
+fn missed_schedule_occurrences_coalesce_instead_of_replaying_a_burst() {
+    let f = Fixture::new();
+    let mut task = scheduled_command(&f, "coalesce");
+    task["every_seconds"] = json!(1);
+    f.config(json!({"github_enabled":false, "scheduled_tasks":[task]}));
+    f.success();
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    f.success();
+    f.success();
+    assert_eq!(scheduled_runs(&f), 2);
+}
+
+#[test]
+fn timed_out_scheduled_commands_do_not_prevent_other_due_tasks() {
+    let f = Fixture::new();
+    let mut task = scheduled_command(&f, "timeout");
+    task["command"].as_array_mut().unwrap().push(json!("wait"));
+    task["timeout_seconds"] = json!(1);
+    f.config(
+        json!({"github_enabled":false, "scheduled_tasks":[task, scheduled_command(&f, "healthy")]}),
+    );
+    let start = std::time::Instant::now();
+    let output = f.run();
+    assert!(!output.status.success());
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 1s"));
+    assert_eq!(
+        schedule_state(&f)["jobs"]["healthy"]["last_run"]["status"],
+        "succeeded"
+    );
+    assert_eq!(scheduled_runs(&f), 2);
 }
