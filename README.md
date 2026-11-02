@@ -25,6 +25,7 @@ multiplexer = "herdr"
 workspace_name = "{repository}#{issue_number} {agent_name}"
 tab_name = "{agent_name}"
 bot_name = "invo"
+use_hostname_as_bot_name = false
 agent = "codex"
 repos_directory = "~/repos"
 poll_interval_seconds = 60
@@ -186,6 +187,7 @@ services.invocateur = {
   workspaceName = "{repository}#{issue_number} {agent_name}";
   tabName = "{agent_name}";
   botName = "invo";
+  useHostnameAsBotName = false;
   agent = "codex";
   agentArgs = [];
   acknowledgementMessage = "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}.";
@@ -271,6 +273,26 @@ Manager to configure the name (without `@`). Mentions are case-insensitive and
 can appear on their own line or alongside instructions. The name need not be a
 GitHub account; authentication and acknowledgement comments use your local `gh`
 account. Plain `summon` no longer triggers an agent.
+
+To address each machine by hostname, enable the optional toggle (off by default):
+
+```toml
+use_hostname_as_bot_name = true
+```
+
+Or with Home Manager:
+
+```nix
+services.invocateur.useHostnameAsBotName = true;
+```
+
+This overrides `bot_name` / `botName` with the short system hostname at startup.
+For example, `thinker` or `thinker.example.com` uses `@thinker`. It reads the
+operating system hostname directly, independently of the `HOSTNAME` environment
+variable. The effective name must use letters, digits, underscores, or hyphens;
+invalid names fail configuration validation. Disable the toggle to use the
+configured name again. `--check-config` and startup logs show the effective
+trigger. Machines retain the same GitHub claim mechanism to prevent duplicates.
 
 Markdown blockquotes (including nested quotes and lazy continuation lines without
 another `>`), fenced/indented code blocks, inline code, links, images, and quoted
@@ -358,6 +380,26 @@ agent = "codex"
 repos_directory = "~/repos"
 poll_interval_seconds = 60
 ```
+
+## Triggers
+
+The service schedules triggers through the `Trigger` interface in
+[`src/triggers/mod.rs`](src/triggers/mod.rs). Each trigger owns its prerequisite
+checks, state, and task dispatch; task types are not restricted by the scheduler.
+GitHub is currently the only built-in trigger, implemented in
+[`src/triggers/github.rs`](src/triggers/github.rs). Future triggers can implement
+this interface for other sources and tasks without depending on GitHub or `gh`.
+
+If `gh` is missing or its authenticated account cannot be verified, the GitHub
+trigger logs an error and skips its poll before reading repositories or claiming
+work. The daemon stays running and retries at the next polling interval; other
+registered triggers still run. Install `gh` (or set `gh_path`) and use
+`gh auth login --hostname github.com` as needed. Token authentication through
+`GH_TOKEN` also works; the trigger verifies identity with `gh api user` rather
+than requiring credentials in a particular local login store.
+
+`--once` polls every registered trigger and returns a nonzero status if any
+trigger fails. `--check-config` does not require `gh` or a GitHub login.
 
 ## Design references
 

@@ -69,7 +69,12 @@ for arg do
       mkdir -p "$4/.git"
       printf '%s\n' "$4" >> "$FIXTURE/clones"
       exit 0 ;;
-    user) printf '{"login":"alice"}'; exit 0 ;;
+    user)
+      if test -f "$FIXTURE/gh-logged-out"; then
+        echo 'not logged in; run gh auth login' >&2
+        exit 1
+      fi
+      printf '{"login":"alice"}'; exit 0 ;;
     search/issues\?*) cat "$FIXTURE/search.json"; exit 0 ;;
     repos/alice/project/issues/comments\?*) cat "$FIXTURE/issues.json"; exit 0 ;;
     repos/alice/project/pulls/comments\?*)
@@ -1108,4 +1113,135 @@ fn empty_toml_and_readme_examples_validate_without_external_commands() {
     }
     assert_eq!(f.launches(), 0);
     assert_eq!(f.acknowledgements(), 0);
+}
+
+#[test]
+fn hostname_bot_name_toggle_routes_mentions_and_reports_the_effective_trigger() {
+    let hostname = hostname::get().unwrap().into_string().unwrap();
+    let short = hostname.split('.').next().unwrap();
+    let configured = if short.eq_ignore_ascii_case("helper") {
+        "another-helper"
+    } else {
+        "helper"
+    };
+    for enabled in [false, true] {
+        let f = Fixture::new();
+        f.config(json!({"bot_name":configured, "use_hostname_as_bot_name":enabled}));
+        let (active, inactive) = if enabled {
+            (short, configured)
+        } else {
+            (configured, short)
+        };
+        f.write(
+            "issues.json",
+            &json!([[
+                Fixture::comment(
+                    1,
+                    "alice",
+                    &format!("@{inactive} Work on the other machine")
+                ),
+                Fixture::comment(2, "alice", &format!("> @{active} Quoted task")),
+                Fixture::comment(3, "alice", &format!("@{active} Fix the actual issue"))
+            ]]),
+        );
+        let output = f
+            .command("state")
+            .env("HOSTNAME", "unrelated-environment-hostname")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(f.launches(), 1);
+        assert_eq!(f.acknowledgements(), 1);
+        let state = f.state();
+        let launches = state["repositories"]["github.com/alice/alice/project"]["launches"]
+            .as_object()
+            .unwrap();
+        assert!(launches.contains_key("i-3"));
+        assert_eq!(launches.len(), 1);
+        let check = f
+            .command("unused-state")
+            .arg("--check-config")
+            .env("HOSTNAME", "unrelated-environment-hostname")
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert!(check.status.success());
+        assert!(String::from_utf8_lossy(&check.stdout).contains(&format!("trigger: @{active}")));
+        assert!(!f.root.join("unused-state").exists());
+    }
+}
+
+#[test]
+fn github_trigger_skips_missing_cli_or_login_then_recovers_without_restarting() {
+    struct Daemon(std::process::Child);
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for missing_cli in [true, false] {
+        let f = Fixture::new();
+        let gh = if missing_cli {
+            f.root.join("gh-installed-later")
+        } else {
+            fs::write(f.root.join("gh-logged-out"), "").unwrap();
+            MOCK_TOOLS.get().unwrap().join("gh")
+        };
+        f.config(json!({"gh_path":gh, "poll_interval_seconds":1}));
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(1, "alice", "@invo Fix this after login")]]),
+        );
+        let log = f.root.join("daemon.log");
+        let mut daemon = Daemon(
+            Command::new(env!("CARGO_BIN_EXE_invocateur"))
+                .arg("--config")
+                .arg(f.root.join("config.toml"))
+                .arg("--state-dir")
+                .arg(f.root.join("state"))
+                .env("FIXTURE", &f.root)
+                .stdout(std::process::Stdio::null())
+                .stderr(fs::File::create(&log).unwrap())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let expected = if missing_cli {
+            "not installed or not in PATH"
+        } else {
+            "cannot verify GitHub authentication"
+        };
+        let error_log = loop {
+            let text = fs::read_to_string(&log).unwrap();
+            if text.contains(expected) {
+                break text;
+            }
+            assert!(std::time::Instant::now() < deadline, "{text}");
+            assert!(daemon.0.try_wait().unwrap().is_none(), "{text}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(error_log.contains("trigger github: skipping poll"));
+        assert_eq!(f.launches(), 0);
+        assert_eq!(f.acknowledgements(), 0);
+        assert!(!f.root.join("state/state.json").exists());
+        assert!(daemon.0.try_wait().unwrap().is_none());
+        if missing_cli {
+            std::os::unix::fs::symlink(MOCK_TOOLS.get().unwrap().join("gh"), &gh).unwrap();
+        } else {
+            fs::remove_file(f.root.join("gh-logged-out")).unwrap();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while f.acknowledgements() != 1 {
+            assert!(std::time::Instant::now() < deadline);
+            assert!(daemon.0.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(f.launches(), 1);
+        assert!(daemon.0.try_wait().unwrap().is_none());
+    }
 }

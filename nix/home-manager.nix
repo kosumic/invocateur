@@ -15,6 +15,7 @@
   settings = {
     inherit (cfg) agent repositories multiplexer;
     bot_name = cfg.botName;
+    use_hostname_as_bot_name = cfg.useHostnameAsBotName;
     workspace_name = cfg.workspaceName;
     tab_name = cfg.tabName;
     agent_args = cfg.agentArgs;
@@ -89,8 +90,9 @@ in {
       type = types.str;
       default = "invo";
       example = "my-agent";
-      description = "Bot name without @. Case-insensitive @name mentions outside quotes, code, and links start an agent.";
+      description = "Bot name without @. Case-insensitive @name mentions outside quotes, code, and links start an agent. Ignored when useHostnameAsBotName is enabled.";
     };
+    useHostnameAsBotName = mkEnableOption "use the machine's short system hostname as the bot name instead of botName";
     agent = mkOption {
       type = types.str;
       default = "codex";
@@ -187,7 +189,7 @@ in {
         message = "services.invocateur requires Linux systemd user services.";
       }
       {
-        assertion = builtins.match "[A-Za-z0-9_-]+" cfg.botName != null;
+        assertion = cfg.useHostnameAsBotName || builtins.match "[A-Za-z0-9_-]+" cfg.botName != null;
         message = "services.invocateur.botName must contain only letters, digits, underscores, or hyphens, without @.";
       }
     ];

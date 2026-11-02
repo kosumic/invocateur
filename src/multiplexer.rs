@@ -1,4 +1,4 @@
-use super::{Client, Config, args, render_template, run};
+use super::{Config, args, render_template, run};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -95,7 +95,7 @@ fn agent_executable(cfg: &Config) -> Result<PathBuf> {
 pub fn ensure_ready(cfg: &Config) -> Result<()> {
     match cfg.multiplexer {
         Multiplexer::Herdr => {
-            Client(cfg).herdr(&args(&["workspace", "list"]))?;
+            herdr(cfg, &args(&["workspace", "list"]))?;
         }
         Multiplexer::Tmux => {
             agent_executable(cfg)?;
@@ -208,16 +208,18 @@ fn launch_herdr(
     request: &LaunchRequest<'_>,
     mut checkpoint: impl FnMut(&str) -> Result<()>,
 ) -> Result<()> {
-    let client = Client(cfg);
-    let workspace = client.herdr(&args(&[
-        "workspace",
-        "create",
-        "--cwd",
-        &request.directory.to_string_lossy(),
-        "--label",
-        request.workspace_name,
-        "--no-focus",
-    ]))?;
+    let workspace = herdr(
+        cfg,
+        &args(&[
+            "workspace",
+            "create",
+            "--cwd",
+            &request.directory.to_string_lossy(),
+            "--label",
+            request.workspace_name,
+            "--no-focus",
+        ]),
+    )?;
     let pane = workspace
         .pointer("/result/root_pane/pane_id")
         .and_then(Value::as_str)
@@ -227,26 +229,39 @@ fn launch_herdr(
         .pointer("/result/tab/tab_id")
         .and_then(Value::as_str)
         .context("Herdr did not return a root tab ID")?;
-    client.herdr(&args(&["tab", "rename", tab, request.tab_name]))?;
+    herdr(cfg, &args(&["tab", "rename", tab, request.tab_name]))?;
     let mut start = args(&[
         "agent",
         "start",
         request.agent_name,
         "--kind",
-        &client.0.agent,
+        &cfg.agent,
         "--pane",
         pane,
     ]);
-    if !client.0.agent_args.is_empty() {
+    if !cfg.agent_args.is_empty() {
         start.push("--".into());
-        start.extend(client.0.agent_args.clone());
+        start.extend(cfg.agent_args.clone());
     }
-    client.herdr(&start)?;
-    client.herdr(&args(&[
-        "agent",
-        "prompt",
-        request.agent_name,
-        request.prompt,
-    ]))?;
+    herdr(cfg, &start)?;
+    herdr(
+        cfg,
+        &args(&["agent", "prompt", request.agent_name, request.prompt]),
+    )?;
     Ok(())
+}
+
+fn herdr(cfg: &Config, argv: &[String]) -> Result<Value> {
+    let mut command = args(&["--session", &cfg.herdr_session]);
+    command.extend_from_slice(argv);
+    let value: Value = serde_json::from_str(&run(
+        &cfg.herdr_path,
+        &command,
+        cfg.command_timeout_seconds,
+    )?)?;
+    ensure!(
+        value.get("error").is_none_or(Value::is_null),
+        "Herdr returned an error: {value}"
+    );
+    Ok(value)
 }
