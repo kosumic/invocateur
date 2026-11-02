@@ -751,9 +751,9 @@ fn poll_repo(
         );
         // Persist BEFORE mutation. A crash or ambiguous failure must never silently launch twice.
         save(state_file, state)?;
-        let result = (|| -> Result<bool> {
+        let result = (|| -> Result<Option<multiplexer::LaunchResponse>> {
             if !client.claim(repo, kind, comment.id, login)? {
-                return Ok(false);
+                return Ok(None);
             }
             state
                 .repositories
@@ -771,7 +771,7 @@ fn poll_repo(
                 workspace_name: &workspace_name,
                 tab_name: &tab_name,
             };
-            multiplexer::launch(client.0, &request, |pane| {
+            let response = multiplexer::launch(client.0, &request, |pane| {
                 state
                     .repositories
                     .get_mut(&key)
@@ -779,10 +779,10 @@ fn poll_repo(
                     .launches
                     .get_mut(&id)
                     .unwrap()
-                    .pane = Some(pane.into());
+                    .pane = Some(pane.to_string());
                 save(state_file, state)
             })?;
-            Ok(true)
+            Ok(Some(response))
         })();
         let record = state
             .repositories
@@ -792,11 +792,12 @@ fn poll_repo(
             .get_mut(&id)
             .unwrap();
         match result {
-            Ok(true) => {
+            Ok(Some(response)) => {
+                record.pane = Some(response.target.to_string());
                 record.status = "started".into();
                 eprintln!("started {name} for {}", comment.html_url);
             }
-            Ok(false) => {
+            Ok(None) => {
                 record.status = "claimed-elsewhere".into();
                 eprintln!("skipping {}: already claimed on GitHub", comment.html_url);
             }

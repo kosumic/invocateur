@@ -521,3 +521,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 nix build .#invocateur
 ```
+
+The [multiplexer adapter contracts](docs/multiplexers.md) describe the typed
+request/response boundary, native identifier validation, error handling, and
+durable launch checkpoints.

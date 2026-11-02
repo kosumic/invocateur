@@ -1,12 +1,17 @@
-use super::{Config, args, render_template, run};
+use super::{Config, render_template};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
     env,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
+
+mod herdr;
+mod models;
+mod tmux;
+mod zellij;
+pub use models::{LaunchResponse, LaunchTarget};
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -100,30 +105,21 @@ fn agent_executable(cfg: &Config) -> Result<PathBuf> {
 pub fn ensure_ready(cfg: &Config) -> Result<()> {
     match cfg.multiplexer {
         Multiplexer::Herdr => {
-            herdr(cfg, &args(&["workspace", "list"]))?;
+            herdr::Client::new(cfg).execute(&herdr::ListWorkspaces)?;
         }
         Multiplexer::Tmux => {
             agent_executable(cfg)?;
-            run(
-                &cfg.tmux_path,
-                &args(&["has-session", "-t", &format!("={}", cfg.tmux_session)]),
-                cfg.command_timeout_seconds,
-            )
-            .context("start the configured tmux session before using Invocateur")?;
+            tmux::HasSession {
+                session: &cfg.tmux_session,
+            }
+            .execute(cfg)?;
         }
         Multiplexer::Zellij => {
             agent_executable(cfg)?;
-            run(
-                &cfg.zellij_path,
-                &args(&[
-                    "--session",
-                    &cfg.zellij_session,
-                    "action",
-                    "query-tab-names",
-                ]),
-                cfg.command_timeout_seconds,
-            )
-            .context("start the configured Zellij session before using Invocateur")?;
+            zellij::QueryTabs {
+                session: &cfg.zellij_session,
+            }
+            .execute(cfg)?;
         }
     }
     Ok(())
@@ -132,141 +128,64 @@ pub fn ensure_ready(cfg: &Config) -> Result<()> {
 pub fn launch(
     cfg: &Config,
     request: &LaunchRequest<'_>,
-    mut checkpoint: impl FnMut(&str) -> Result<()>,
-) -> Result<()> {
-    match cfg.multiplexer {
-        Multiplexer::Herdr => launch_herdr(cfg, request, checkpoint),
+    mut checkpoint: impl FnMut(&LaunchTarget) -> Result<()>,
+) -> Result<LaunchResponse> {
+    let target = match cfg.multiplexer {
+        Multiplexer::Herdr => {
+            let client = herdr::Client::new(cfg);
+            let workspace = client.execute(&herdr::CreateWorkspace {
+                directory: request.directory,
+                label: request.workspace_name,
+            })?;
+            let pane = workspace.pane()?.clone();
+            let target = LaunchTarget::HerdrPane(pane.clone());
+            checkpoint(&target)?;
+            client.execute(&herdr::RenameTab {
+                tab: workspace.tab()?,
+                label: request.tab_name,
+            })?;
+            client.execute(&herdr::StartAgent {
+                name: request.agent_name,
+                kind: &cfg.agent,
+                pane: &pane,
+                arguments: &cfg.agent_args,
+            })?;
+            client.execute(&herdr::PromptAgent {
+                name: request.agent_name,
+                text: request.prompt,
+            })?;
+            target
+        }
         Multiplexer::Tmux => {
-            // An explicit POSIX shell keeps this independent of the user's default shell.
-            // Its complete command is one quoted tmux argument, including hostile task text.
-            let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
             let executable = agent_executable(cfg)?;
-            let mut command = vec![quote(&executable.to_string_lossy())];
-            command.extend(cfg.agent_args.iter().map(|arg| quote(arg)));
-            command.push(quote(request.prompt));
-            let command = format!("exec {}", command.join(" "));
-            let argv = args(&[
-                "new-window",
-                "-d",
-                "-P",
-                "-F",
-                "#{pane_id}",
-                "-t",
-                &format!("={}:", cfg.tmux_session),
-                "-n",
-                request.tab_name,
-                "-c",
-                &request.directory.to_string_lossy(),
-                "--",
-                "sh",
-                "-c",
-                &command,
-            ]);
-            // tmux treats a trailing semicolon as a command separator even in argv input.
-            let argv: Vec<_> = argv
-                .into_iter()
-                .map(|arg| {
-                    arg.strip_suffix(';')
-                        .map(|prefix| format!("{prefix}\\;"))
-                        .unwrap_or(arg)
-                })
-                .collect();
-            let pane = run(&cfg.tmux_path, &argv, cfg.command_timeout_seconds)?;
-            let pane = pane.trim();
-            ensure!(
-                pane.starts_with('%')
-                    && pane[1..].bytes().all(|byte| byte.is_ascii_digit())
-                    && pane.len() > 1,
-                "tmux did not return a pane ID"
-            );
-            checkpoint(pane)
+            let response = tmux::NewWindow {
+                session: &cfg.tmux_session,
+                directory: request.directory,
+                name: request.tab_name,
+                executable: &executable,
+                arguments: &cfg.agent_args,
+                prompt: request.prompt,
+            }
+            .execute(cfg)?;
+            let target = LaunchTarget::TmuxPane(response.pane);
+            checkpoint(&target)?;
+            target
         }
         Multiplexer::Zellij => {
             let executable = agent_executable(cfg)?;
-            let mut command = args(&[
-                "--session",
-                &cfg.zellij_session,
-                "action",
-                "new-tab",
-                "--no-focus",
-                "--name",
-                request.tab_name,
-                "--cwd",
-                &request.directory.to_string_lossy(),
-                "--",
-                &executable.to_string_lossy(),
-            ]);
-            command.extend(cfg.agent_args.clone());
-            command.push(request.prompt.into());
-            let tab = run(&cfg.zellij_path, &command, cfg.command_timeout_seconds)?;
-            let tab: u32 = tab
-                .trim()
-                .parse()
-                .context("Zellij did not return a tab ID")?;
-            checkpoint(&format!("tab:{tab}"))
+            let response = zellij::NewTab {
+                session: &cfg.zellij_session,
+                directory: request.directory,
+                name: request.tab_name,
+                executable: &executable,
+                arguments: &cfg.agent_args,
+                prompt: request.prompt,
+            }
+            .execute(cfg)?;
+            let target = LaunchTarget::ZellijTab(response.tab);
+            checkpoint(&target)?;
+            target
         }
-    }
-}
-
-fn launch_herdr(
-    cfg: &Config,
-    request: &LaunchRequest<'_>,
-    mut checkpoint: impl FnMut(&str) -> Result<()>,
-) -> Result<()> {
-    let workspace = herdr(
-        cfg,
-        &args(&[
-            "workspace",
-            "create",
-            "--cwd",
-            &request.directory.to_string_lossy(),
-            "--label",
-            request.workspace_name,
-            "--no-focus",
-        ]),
-    )?;
-    let pane = workspace
-        .pointer("/result/root_pane/pane_id")
-        .and_then(Value::as_str)
-        .context("Herdr did not return a root pane ID")?;
-    checkpoint(pane)?;
-    let tab = workspace
-        .pointer("/result/tab/tab_id")
-        .and_then(Value::as_str)
-        .context("Herdr did not return a root tab ID")?;
-    herdr(cfg, &args(&["tab", "rename", tab, request.tab_name]))?;
-    let mut start = args(&[
-        "agent",
-        "start",
-        request.agent_name,
-        "--kind",
-        &cfg.agent,
-        "--pane",
-        pane,
-    ]);
-    if !cfg.agent_args.is_empty() {
-        start.push("--".into());
-        start.extend(cfg.agent_args.clone());
-    }
-    herdr(cfg, &start)?;
-    herdr(
-        cfg,
-        &args(&["agent", "prompt", request.agent_name, request.prompt]),
-    )?;
-    Ok(())
-}
-
-fn herdr(cfg: &Config, argv: &[String]) -> Result<Value> {
-    let mut command = args(&["--session", &cfg.herdr_session]);
-    command.extend_from_slice(argv);
-    let value: Value = serde_json::from_str(&run(
-        &cfg.herdr_path,
-        &command,
-        cfg.command_timeout_seconds,
-    )?)?;
-    ensure!(
-        value.get("error").is_none_or(Value::is_null),
-        "Herdr returned an error: {value}"
-    );
-    Ok(value)
+    };
+    Ok(LaunchResponse { target })
 }

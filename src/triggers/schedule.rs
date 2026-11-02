@@ -564,8 +564,9 @@ impl<'a> ScheduleTrigger<'a> {
                         workspace_name: &workspace_name,
                         tab_name: &tab_name,
                     },
-                    |pane| self.store.checkpoint(&task.name, run.id, pane),
+                    |pane| self.store.checkpoint(&task.name, run.id, &pane.to_string()),
                 )
+                .map(|_response| ())
             })()
         } else {
             run_in_directory(

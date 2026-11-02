@@ -207,6 +207,37 @@ fn run_in_directory(
     timeout: u64,
     directory: Option<&Path>,
 ) -> Result<String> {
+    run_command(program, args, timeout, directory)?.into_stdout(program)
+}
+
+struct CommandOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+impl CommandOutput {
+    fn ensure_success(&self, program: &str) -> Result<()> {
+        ensure!(
+            self.status.success(),
+            "{program} failed ({}): {}",
+            self.status,
+            String::from_utf8_lossy(&self.stderr)
+        );
+        Ok(())
+    }
+    fn into_stdout(self, program: &str) -> Result<String> {
+        self.ensure_success(program)?;
+        String::from_utf8(self.stdout)
+            .with_context(|| format!("{program} returned non-UTF-8 output"))
+    }
+}
+
+fn run_command(
+    program: &str,
+    args: &[String],
+    timeout: u64,
+    directory: Option<&Path>,
+) -> Result<CommandOutput> {
     let mut command = Command::new(program);
     if let Some(directory) = directory {
         command.current_dir(directory);
@@ -263,12 +294,11 @@ fn run_in_directory(
     let stderr = err
         .join()
         .map_err(|_| anyhow::anyhow!("stderr reader panicked"))??;
-    ensure!(
-        status.success(),
-        "{program} failed ({status}): {}",
-        String::from_utf8_lossy(&stderr)
-    );
-    Ok(String::from_utf8(stdout)?)
+    Ok(CommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn args(values: &[&str]) -> Vec<String> {

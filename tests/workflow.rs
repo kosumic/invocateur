@@ -130,17 +130,21 @@ shift 2
 case "$1 $2" in
   'workspace list')
     if test -f "$FIXTURE/server-down"; then exit 1; fi
-    printf '{"result":{"workspaces":[]}}' ;;
+    if test -f "$FIXTURE/herdr-list-response.json"; then cat "$FIXTURE/herdr-list-response.json"; exit 0; fi
+    printf '{"id":"ready","result":{"workspaces":[{"workspace_id":"w7","future_field":true}],"future_field":true},"error":null}' ;;
   'workspace create')
     printf 'workspace\n' >> "$FIXTURE/launches"
     printf '%s\n' "$@" >> "$FIXTURE/workspace-args"
-    printf '{"result":{"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"w7:p9"}}}' ;;
+    if test -f "$FIXTURE/herdr-workspace-response.json"; then cat "$FIXTURE/herdr-workspace-response.json"; exit 0; fi
+    printf '{"result":{"workspace":{"workspace_id":"w7"},"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"w7:p9"},"future_field":true},"error":null}' ;;
   'tab rename')
     test "$3" = w7:t1 || exit 2
     printf '%s\n' "$4" >> "$FIXTURE/tab-names"
+    if test -f "$FIXTURE/herdr-ack-response.json"; then cat "$FIXTURE/herdr-ack-response.json"; exit 0; fi
     printf '{"result":{}}' ;;
   'agent start')
     printf '%s\n' "$@" >> "$FIXTURE/start-args"
+    if test -f "$FIXTURE/herdr-json-error"; then printf '{"error":{"code":"agent_blocked","message":"approval pending","future_field":true}}'; exit 1; fi
     if test -f "$FIXTURE/agent-fails"; then echo 'agent_not_ready' >&2; exit 1; fi
     printf '{"result":{}}' ;;
   'agent prompt')
@@ -187,7 +191,7 @@ case "$1" in
     done
     printf 'tmux\n' >> "$FIXTURE/launches"
     (cd "$directory" && "$@")
-    printf '%%7\n' ;;
+    if test -f "$FIXTURE/multiplexer-response.txt"; then cat "$FIXTURE/multiplexer-response.txt"; else printf '%%7\n'; fi ;;
   *) exit 2 ;;
 esac
 "#),
@@ -212,7 +216,7 @@ case "$4" in
     done
     printf 'zellij\n' >> "$FIXTURE/launches"
     (cd "$directory" && "$@")
-    printf '3\n' ;;
+    if test -f "$FIXTURE/multiplexer-response.txt"; then cat "$FIXTURE/multiplexer-response.txt"; else printf '3\n'; fi ;;
   *) exit 2 ;;
 esac
 "#),
@@ -1770,4 +1774,154 @@ fn dynamic_schedule_intervals_do_not_increase_github_polling_frequency() {
             .count(),
         1
     );
+}
+
+#[test]
+fn malformed_herdr_readiness_replies_do_not_claim_work_and_can_be_retried() {
+    for response in [
+        json!({}),
+        json!({"result":null}),
+        json!({"result":{"workspaces":"not an array"}}),
+        json!({"result":{"workspaces":[{"workspace_id":"wrong"}]}}),
+        json!({"result":{"workspaces":[]},"error":{"code":"busy","message":"retry later"}}),
+        json!({"result":[[]]}),
+    ] {
+        let f = Fixture::new();
+        f.write("herdr-list-response.json", &response);
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(1, "alice", "@invo Fix this")]]),
+        );
+        assert!(!f.run().status.success());
+        assert_eq!(f.launches(), 0);
+        assert!(!fs::read_dir(&f.root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("reaction-")
+        }));
+        fs::remove_file(f.root.join("herdr-list-response.json")).unwrap();
+        f.success();
+        assert_eq!(f.launches(), 1);
+        assert_eq!(f.acknowledgements(), 1);
+    }
+}
+
+#[test]
+fn typed_herdr_replies_retain_known_panes_when_other_fields_are_invalid() {
+    for tab in [Value::Null, json!({"tab_id":17}), json!({"tab_id":"w8:t1"})] {
+        let f = Fixture::new();
+        f.write(
+            "herdr-workspace-response.json",
+            &json!({"result":{"root_pane":{"pane_id":"w7:p9"},"tab":tab}}),
+        );
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(1, "alice", "@invo Fix this")]]),
+        );
+        f.success();
+        let state = f.state();
+        let record = &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"];
+        assert_eq!(record["status"], "needs-attention");
+        assert_eq!(record["pane"], "w7:p9");
+        assert_eq!(f.acknowledgements(), 0);
+        assert!(!f.root.join("start-args").exists());
+        fs::remove_file(f.root.join("herdr-workspace-response.json")).unwrap();
+        assert!(
+            f.command("other-machine")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert_eq!(f.launches(), 1, "ambiguous launch was repeated");
+    }
+}
+
+#[test]
+fn malformed_herdr_create_and_acknowledgement_replies_never_report_started() {
+    for (file, response) in [
+        (
+            "herdr-workspace-response.json",
+            json!({"result":[{"pane_id":"w7:p9"},{"tab_id":"w7:t1"}]}),
+        ),
+        (
+            "herdr-workspace-response.json",
+            json!({"result":{"root_pane":{"pane_id":"not-a-pane"},"tab":{"tab_id":"w7:t1"}}}),
+        ),
+        ("herdr-ack-response.json", json!({"result":[]})),
+    ] {
+        let f = Fixture::new();
+        f.write(file, &response);
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(1, "alice", "@invo Fix this")]]),
+        );
+        f.success();
+        assert_eq!(
+            f.state()["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"]["status"],
+            "needs-attention"
+        );
+        assert_eq!(f.acknowledgements(), 0);
+        assert!(!f.root.join("start-args").exists());
+    }
+}
+
+#[test]
+fn herdr_cli_json_errors_keep_their_codes_even_with_a_nonzero_exit() {
+    let f = Fixture::new();
+    fs::write(f.root.join("herdr-json-error"), "").unwrap();
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "@invo Fix this")]]),
+    );
+    f.success();
+    let state = f.state();
+    let record = &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"];
+    assert_eq!(record["pane"], "w7:p9");
+    assert_eq!(record["status"], "needs-attention");
+    let error = record["error"].as_str().unwrap();
+    assert!(
+        error.contains("agent_blocked") && error.contains("approval pending"),
+        "{error}"
+    );
+    assert_eq!(f.acknowledgements(), 0);
+    assert!(!f.root.join("prompts").exists());
+}
+
+#[test]
+fn malformed_native_mux_identifiers_preserve_claims_and_do_not_acknowledge() {
+    for (backend, replies) in [
+        ("tmux", vec!["%", "%7\n%8\n", "plain text"]),
+        ("zellij", vec!["-1", "4294967296", "3\n4\n", "+3"]),
+    ] {
+        for response in replies {
+            let f = Fixture::new();
+            f.config(
+                json!({"multiplexer":backend,"agent":MOCK_TOOLS.get().unwrap().join("agent")}),
+            );
+            fs::write(f.root.join("multiplexer-response.txt"), response).unwrap();
+            f.write(
+                "issues.json",
+                &json!([[Fixture::comment(1, "alice", "@invo Fix this")]]),
+            );
+            f.success();
+            let state = f.state();
+            let record =
+                &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"];
+            assert_eq!(record["status"], "needs-attention");
+            assert!(record["pane"].is_null());
+            assert_eq!(f.acknowledgements(), 0);
+            fs::remove_file(f.root.join("multiplexer-response.txt")).unwrap();
+            assert!(
+                f.command("other-machine")
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert_eq!(f.launches(), 1, "{backend} repeated an ambiguous creation");
+        }
+    }
 }
