@@ -334,7 +334,7 @@ fn own_mentions_only_paginated_and_deduplicated_across_restarts() {
     let prompt = fs::read_to_string(f.root.join("prompts")).unwrap();
     assert_eq!(
         prompt,
-        "Work on it: https://github.com/alice/project/issues/42#issuecomment-6\n"
+        "Work on it: https://github.com/alice/project/issues/42#issuecomment-6\n\nWhen posting a new comment on GitHub, start its body with \"gh-i-6:\".\n"
     );
     let start = fs::read_to_string(f.root.join("start-args")).unwrap();
     assert!(start.contains("codex") && start.contains("w7:p9"));
@@ -434,14 +434,14 @@ fn inline_review_comments_and_edits_can_summon() {
     );
     assert_eq!(f.acknowledgements(), 2);
     let prompts = fs::read_to_string(f.root.join("prompts")).unwrap();
-    let mut prompts: Vec<_> = prompts.lines().collect();
-    prompts.sort_unstable();
     assert_eq!(
         prompts,
-        [
-            "Work on it: https://github.com/alice/project/issues/42#issuecomment-1",
-            "Work on it: https://github.com/alice/project/pull/42#discussion_r1"
-        ]
+        concat!(
+            "Work on it: https://github.com/alice/project/issues/42#issuecomment-1\n\n",
+            "When posting a new comment on GitHub, start its body with \"gh-i-1:\".\n",
+            "Work on it: https://github.com/alice/project/pull/42#discussion_r1\n\n",
+            "When posting a new comment on GitHub, start its body with \"gh-r-1:\".\n"
+        )
     );
 }
 
@@ -802,7 +802,7 @@ fn an_unquoted_mention_after_a_quote_or_example_still_summons() {
     let prompts = fs::read_to_string(f.root.join("prompts")).unwrap();
     let expected: String = (100..100 + bodies.len())
         .map(|id| {
-            format!("Work on it: https://github.com/alice/project/issues/42#issuecomment-{id}\n")
+            format!("Work on it: https://github.com/alice/project/issues/42#issuecomment-{id}\n\nWhen posting a new comment on GitHub, start its body with \"gh-i-{id}:\".\n")
         })
         .collect();
     assert_eq!(prompts, expected);
@@ -874,7 +874,7 @@ fn tmux_and_zellij_launch_native_agents_with_literal_arguments_and_names() {
         );
         assert_eq!(
             *argv.last().unwrap(),
-            "Work on it: https://github.com/alice/project/issues/42#issuecomment-1"
+            "Work on it: https://github.com/alice/project/issues/42#issuecomment-1\n\nWhen posting a new comment on GitHub, start its body with \"gh-i-1:\"."
         );
         let cwd = fs::read_to_string(f.root.join("agent-cwd")).unwrap();
         assert_eq!(
@@ -1666,6 +1666,12 @@ fn dynamically_created_agents_start_without_restarts_and_are_not_replayed() {
     );
     let job = wait_status(&f, "review", "started");
     assert_eq!(job["last_run"]["pane"], "w7:p9");
+    let agent_name = job["last_run"]["agent_name"].as_str().unwrap();
+    let prompt = fs::read_to_string(f.root.join("prompts")).unwrap();
+    assert!(prompt.contains("Review changes; keep $HOME literal."));
+    assert!(prompt.ends_with(&format!(
+        "\n\nWhen posting a new comment on GitHub, start its body with \"{agent_name}:\".\n"
+    )));
     assert_eq!(f.launches(), 1);
     assert_eq!(f.acknowledgements(), 0);
     assert!(

@@ -130,6 +130,10 @@ pub fn launch(
     request: &LaunchRequest<'_>,
     mut checkpoint: impl FnMut(&LaunchTarget) -> Result<()>,
 ) -> Result<LaunchResponse> {
+    let prompt = format!(
+        "{}\n\nWhen posting a new comment on GitHub, start its body with \"{}:\".",
+        request.prompt, request.agent_name
+    );
     let target = match cfg.multiplexer {
         Multiplexer::Herdr => {
             let client = herdr::Client::new(cfg);
@@ -152,7 +156,7 @@ pub fn launch(
             })?;
             client.execute(&herdr::PromptAgent {
                 name: request.agent_name,
-                text: request.prompt,
+                text: &prompt,
             })?;
             target
         }
@@ -164,7 +168,7 @@ pub fn launch(
                 name: request.tab_name,
                 executable: &executable,
                 arguments: &cfg.agent_args,
-                prompt: request.prompt,
+                prompt: &prompt,
             }
             .execute(cfg)?;
             let target = LaunchTarget::TmuxPane(response.pane);
@@ -179,7 +183,7 @@ pub fn launch(
                 name: request.tab_name,
                 executable: &executable,
                 arguments: &cfg.agent_args,
-                prompt: request.prompt,
+                prompt: &prompt,
             }
             .execute(cfg)?;
             let target = LaunchTarget::ZellijTab(response.tab);

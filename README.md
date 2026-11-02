@@ -304,10 +304,14 @@ handles such as `@invo-other` do not match. A fresh unquoted mention after a
 Markdown quote still works. Comments containing
 raw HTML `<blockquote>` or `<q>` containers are ignored entirely. Only comments from
 the account returned by `gh api user` are accepted. Issue/PR descriptions and
-review summary bodies are not triggers. The agent receives only `Work on it:`
-followed by the triggering comment's link. It reads the issue or PR and your
-instructions from GitHub; Invo does not fetch or paste the title, description,
-or comment text into the launch prompt.
+review summary bodies are not triggers. The agent receives `Work on it:`
+followed by the triggering comment's link, plus an instruction to start any new
+GitHub comment with its agent instance name and a colon (for example,
+`gh-i-123: Working on it.`). This identity instruction also applies to scheduled
+agents and all multiplexer backends, using each launch's own agent name. It is
+independent of the bot mention, agent program, and configurable workspace/tab names.
+The agent reads the issue or PR and your instructions from GitHub; Invo does not
+fetch or paste the title, description, or comment text into the launch prompt.
 
 The service searches for your recently updated conversations and reviews across
 GitHub and inspects their repositories. Set `discoverGithubRepositories = false`
