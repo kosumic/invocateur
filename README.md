@@ -11,7 +11,7 @@ Add the flake input, following your configuration's Nixpkgs if desired:
 
 ```nix
 inputs.invocateur = {
-  url = "git+ssh://git@github.com/kosumic/invocateur.git";
+  url = "github:kosumic/invocateur";
   inputs.nixpkgs.follows = "nixpkgs";
 };
 ```
@@ -115,8 +115,8 @@ and `homeManagerModules.default`. The standalone binary accepts JSON settings
 with snake_case names, with the same defaults as the module:
 
 ```bash
-nix run git+ssh://git@github.com/kosumic/invocateur.git -- --config /path/to/config.json --check-config
-nix run git+ssh://git@github.com/kosumic/invocateur.git -- --config /path/to/config.json --once
+nix run github:kosumic/invocateur -- --config /path/to/config.json --check-config
+nix run github:kosumic/invocateur -- --config /path/to/config.json --once
 ```
 
 `--once` performs one poll without sleeping. `--check-config` validates settings
