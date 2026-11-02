@@ -8,9 +8,11 @@ use croner::Cron;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::Write,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 fn yes() -> bool {
@@ -45,7 +47,7 @@ pub struct Task {
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
-    pub run_on_startup: bool,
+    pub run_immediately: bool,
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
     #[serde(default = "workspace")]
@@ -117,23 +119,6 @@ pub fn validate(tasks: &mut [Task], default_directory: &Path, default_timeout: u
     Ok(())
 }
 
-#[derive(Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-struct Definition {
-    cron: Option<String>,
-    every_seconds: Option<u64>,
-    timezone: String,
-}
-impl From<&Task> for Definition {
-    fn from(task: &Task) -> Self {
-        Self {
-            cron: task.cron.clone(),
-            every_seconds: task.every_seconds,
-            timezone: task.timezone.clone(),
-        }
-    }
-}
-
 enum Timing {
     Interval(TimeDelta),
     Cron(Box<Cron>, Tz),
@@ -169,91 +154,372 @@ impl Timing {
     }
 }
 
+#[derive(Debug)]
+pub struct ApiError {
+    pub status: u16,
+    message: String,
+}
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for ApiError {}
+pub fn problem(status: u16, message: impl Into<String>) -> anyhow::Error {
+    ApiError {
+        status,
+        message: message.into(),
+    }
+    .into()
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Run {
-    scheduled_at: DateTime<Utc>,
-    status: String,
-    agent_name: Option<String>,
-    pane: Option<String>,
-    error: Option<String>,
+pub struct Run {
+    pub id: u64,
+    pub scheduled_at: DateTime<Utc>,
+    pub status: String,
+    pub agent_name: Option<String>,
+    pub pane: Option<String>,
+    pub error: Option<String>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Job {
-    definition: Definition,
-    next_run: DateTime<Utc>,
-    last_run: Option<Run>,
+pub struct Job {
+    pub task: Task,
+    pub revision: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub next_run: Option<DateTime<Utc>>,
+    pub last_run: Option<Run>,
 }
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct State {
+struct Database {
+    version: u32,
     jobs: BTreeMap<String, Job>,
+}
+
+pub struct Store {
+    database: Mutex<Database>,
+    path: PathBuf,
+    default_directory: PathBuf,
+    default_timeout: u64,
+}
+impl Store {
+    pub fn open(cfg: &Config, state_dir: &Path) -> Result<Self> {
+        let path = state_dir.join("schedules.json");
+        let mut database: Database = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .context("invalid schedule store; refusing to forget dispatched tasks")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Database {
+                version: 1,
+                jobs: BTreeMap::new(),
+            },
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(
+            database.version == 1,
+            "unsupported schedule store version {}",
+            database.version
+        );
+        for job in database.jobs.values_mut() {
+            validate(
+                std::slice::from_mut(&mut job.task),
+                &cfg.repos_directory,
+                cfg.command_timeout_seconds,
+            )?;
+            if let Some(run) = &mut job.last_run
+                && run.status == "reserved"
+            {
+                run.status = "needs-attention".into();
+                run.error = Some("Service stopped during dispatch; review the previous work and use schedule resume.".into());
+                job.revision += 1;
+            }
+        }
+        write_json(&path, &database)?;
+        Ok(Self {
+            database: Mutex::new(database),
+            path,
+            default_directory: cfg.repos_directory.clone(),
+            default_timeout: cfg.command_timeout_seconds,
+        })
+    }
+    fn transaction<T>(&self, edit: impl FnOnce(&mut Database) -> Result<T>) -> Result<T> {
+        let mut current = self
+            .database
+            .lock()
+            .map_err(|_| anyhow::anyhow!("schedule store lock poisoned"))?;
+        let mut next = current.clone();
+        let output = edit(&mut next)?;
+        write_json(&self.path, &next)?;
+        *current = next;
+        Ok(output)
+    }
+    pub fn list(&self) -> Result<Vec<Job>> {
+        Ok(self
+            .database
+            .lock()
+            .map_err(|_| anyhow::anyhow!("schedule store lock poisoned"))?
+            .jobs
+            .values()
+            .cloned()
+            .collect())
+    }
+    pub fn get(&self, name: &str) -> Result<Job> {
+        self.database
+            .lock()
+            .map_err(|_| anyhow::anyhow!("schedule store lock poisoned"))?
+            .jobs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| problem(404, format!("schedule {name} not found")))
+    }
+    fn validated(&self, value: serde_json::Value) -> Result<Task> {
+        let mut task: Task =
+            serde_json::from_value(value).map_err(|error| problem(400, error.to_string()))?;
+        validate(
+            std::slice::from_mut(&mut task),
+            &self.default_directory,
+            self.default_timeout,
+        )
+        .map_err(|error| problem(400, format!("{error:#}")))?;
+        Ok(task)
+    }
+    fn next(task: &Task, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
+        if !task.enabled {
+            return Ok(None);
+        }
+        if task.run_immediately {
+            return Ok(Some(now));
+        }
+        Ok(Some(Timing::new(task)?.after(now)?))
+    }
+    pub fn create(&self, value: serde_json::Value) -> Result<Job> {
+        let mut task = self.validated(value)?;
+        let now = Utc::now();
+        let next_run = Self::next(&task, now)?;
+        task.run_immediately = false;
+        self.transaction(|database| {
+            if database.jobs.contains_key(&task.name) {
+                return Err(problem(
+                    409,
+                    format!("schedule {} already exists", task.name),
+                ));
+            }
+            let job = Job {
+                task,
+                revision: 1,
+                created_at: now,
+                updated_at: now,
+                next_run,
+                last_run: None,
+            };
+            database.jobs.insert(job.task.name.clone(), job.clone());
+            Ok(job)
+        })
+    }
+    fn editable(job: &Job, revision: Option<u64>) -> Result<()> {
+        if revision.is_some_and(|revision| revision != job.revision) {
+            return Err(problem(
+                412,
+                "schedule revision changed; read it again before editing",
+            ));
+        }
+        if job
+            .last_run
+            .as_ref()
+            .is_some_and(|run| run.status == "reserved")
+        {
+            return Err(problem(
+                409,
+                "schedule is dispatching; retry after the current dispatch finishes",
+            ));
+        }
+        Ok(())
+    }
+    pub fn update(
+        &self,
+        name: &str,
+        value: serde_json::Value,
+        replace: bool,
+        revision: Option<u64>,
+    ) -> Result<Job> {
+        self.transaction(|database| {
+            let job = database
+                .jobs
+                .get_mut(name)
+                .ok_or_else(|| problem(404, format!("schedule {name} not found")))?;
+            Self::editable(job, revision)?;
+            let mut fields = if replace {
+                serde_json::Map::new()
+            } else {
+                serde_json::to_value(&job.task)?
+                    .as_object()
+                    .unwrap()
+                    .clone()
+            };
+            let updates = value
+                .as_object()
+                .ok_or_else(|| problem(400, "schedule body must be an object"))?;
+            fields.extend(updates.clone());
+            if fields
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|updated| updated != name)
+            {
+                return Err(problem(
+                    400,
+                    "schedule names are immutable; create a new schedule to rename it",
+                ));
+            }
+            fields.insert("name".into(), serde_json::Value::String(name.into()));
+            let mut task = self.validated(serde_json::Value::Object(fields))?;
+            job.next_run = Self::next(&task, Utc::now())?;
+            task.run_immediately = false;
+            job.task = task;
+            job.revision += 1;
+            job.updated_at = Utc::now();
+            Ok(job.clone())
+        })
+    }
+    pub fn delete(&self, name: &str, revision: Option<u64>) -> Result<()> {
+        self.transaction(|database| {
+            let job = database
+                .jobs
+                .get(name)
+                .ok_or_else(|| problem(404, format!("schedule {name} not found")))?;
+            Self::editable(job, revision)?;
+            database.jobs.remove(name);
+            Ok(())
+        })
+    }
+    pub fn resume(&self, name: &str, revision: Option<u64>) -> Result<Job> {
+        self.transaction(|database| {
+            let job = database
+                .jobs
+                .get_mut(name)
+                .ok_or_else(|| problem(404, format!("schedule {name} not found")))?;
+            Self::editable(job, revision)?;
+            let run = job
+                .last_run
+                .as_mut()
+                .filter(|run| run.status == "needs-attention")
+                .ok_or_else(|| problem(409, "schedule does not need recovery"))?;
+            run.status = "acknowledged".into();
+            job.next_run = Self::next(&job.task, Utc::now())?;
+            job.revision += 1;
+            job.updated_at = Utc::now();
+            Ok(job.clone())
+        })
+    }
+    fn claim(&self, name: &str, revision: u64) -> Result<Option<Job>> {
+        self.transaction(|database| {
+            let Some(job) = database.jobs.get_mut(name) else {
+                return Ok(None);
+            };
+            if job.revision != revision
+                || !job.task.enabled
+                || job.next_run.is_none_or(|next| next > Utc::now())
+                || job.last_run.as_ref().is_some_and(|run| {
+                    matches!(run.status.as_str(), "reserved" | "needs-attention")
+                })
+            {
+                return Ok(None);
+            }
+            let scheduled_at = job.next_run.unwrap();
+            job.revision += 1;
+            let agent_name = job
+                .task
+                .prompt
+                .as_ref()
+                .map(|_| format!("schedule-{}-{}", name, job.revision));
+            job.last_run = Some(Run {
+                id: job.revision,
+                scheduled_at,
+                status: "reserved".into(),
+                agent_name,
+                pane: None,
+                error: None,
+            });
+            job.next_run = Some(Timing::new(&job.task)?.after(Utc::now())?);
+            job.updated_at = Utc::now();
+            Ok(Some(job.clone()))
+        })
+    }
+    fn checkpoint(&self, name: &str, id: u64, pane: &str) -> Result<()> {
+        self.transaction(|database| {
+            let job = database
+                .jobs
+                .get_mut(name)
+                .context("dispatched schedule disappeared")?;
+            let run = job
+                .last_run
+                .as_mut()
+                .filter(|run| run.id == id)
+                .context("schedule dispatch changed")?;
+            run.pane = Some(pane.into());
+            job.revision += 1;
+            Ok(())
+        })
+    }
+    fn finish(&self, name: &str, id: u64, result: &Result<()>) -> Result<()> {
+        self.transaction(|database| {
+            let job = database
+                .jobs
+                .get_mut(name)
+                .context("dispatched schedule disappeared")?;
+            let run = job
+                .last_run
+                .as_mut()
+                .filter(|run| run.id == id)
+                .context("schedule dispatch changed")?;
+            run.status = match (result.is_ok(), job.task.prompt.is_some()) {
+                (true, true) => "started",
+                (true, false) => "succeeded",
+                (false, true) => "needs-attention",
+                (false, false) => "failed",
+            }
+            .into();
+            run.error = result.as_ref().err().map(|error| format!("{error:#}"));
+            job.next_run = if job.task.enabled {
+                Some(Timing::new(&job.task)?.after(Utc::now())?)
+            } else {
+                None
+            };
+            job.revision += 1;
+            job.updated_at = Utc::now();
+            Ok(())
+        })
+    }
+}
+
+pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let temp = path.with_extension("json.tmp");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temp)?;
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(&serde_json::to_vec_pretty(value)?)?;
+    file.sync_all()?;
+    fs::rename(&temp, path)?;
+    File::open(path.parent().unwrap())?.sync_all()?;
+    Ok(())
 }
 
 pub struct ScheduleTrigger<'a> {
     cfg: &'a Config,
-    state_file: PathBuf,
-    state: State,
-    timings: BTreeMap<String, Timing>,
+    store: Arc<Store>,
 }
 impl<'a> ScheduleTrigger<'a> {
-    pub fn new(cfg: &'a Config, state_dir: &Path) -> Result<Self> {
-        let state_file = state_dir.join("schedules.json");
-        let mut state: State = match fs::read(&state_file) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .context("invalid schedules state; refusing to forget dispatched tasks")?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => State::default(),
-            Err(error) => return Err(error.into()),
-        };
-        let mut timings = BTreeMap::new();
-        let now = Utc::now();
-        for task in cfg.scheduled_tasks.iter().filter(|task| task.enabled) {
-            let timing = Timing::new(task)?;
-            let definition = Definition::from(task);
-            let existing = state.jobs.get_mut(&task.name);
-            if let Some(existing) = existing {
-                if existing.definition != definition {
-                    existing.definition = definition;
-                    existing.next_run = timing.after(now)?;
-                }
-            } else {
-                let next_run = if task.run_on_startup {
-                    now
-                } else {
-                    timing.after(now)?
-                };
-                state.jobs.insert(
-                    task.name.clone(),
-                    Job {
-                        definition,
-                        next_run,
-                        last_run: None,
-                    },
-                );
-            }
-            timings.insert(task.name.clone(), timing);
-        }
-        let trigger = Self {
-            cfg,
-            state_file,
-            state,
-            timings,
-        };
-        trigger.save()?;
-        Ok(trigger)
+    pub fn new(cfg: &'a Config, store: Arc<Store>) -> Self {
+        Self { cfg, store }
     }
-    fn save(&self) -> Result<()> {
-        let temp = self.state_file.with_extension("json.tmp");
-        let mut file = File::create(&temp)?;
-        file.write_all(&serde_json::to_vec_pretty(&self.state)?)?;
-        file.sync_all()?;
-        fs::rename(&temp, &self.state_file)?;
-        File::open(self.state_file.parent().unwrap())?.sync_all()?;
-        Ok(())
-    }
-    fn dispatch(&mut self, task: &Task) -> Result<()> {
-        let scheduled_at = self.state.jobs[&task.name].next_run;
+    fn dispatch(&self, snapshot: &Job) -> Result<()> {
+        let task = &snapshot.task;
         let directory = task
             .directory
             .as_deref()
@@ -263,56 +529,44 @@ impl<'a> ScheduleTrigger<'a> {
             "task directory {} does not exist",
             directory.display()
         );
-        let agent_name = format!("schedule-{}-{}", task.name, scheduled_at.timestamp());
-        let scheduled = scheduled_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+        if task.prompt.is_some() {
+            multiplexer::ensure_ready(self.cfg)?;
+        }
+        let Some(job) = self.store.claim(&task.name, snapshot.revision)? else {
+            return Ok(());
+        };
+        let run = job.last_run.as_ref().unwrap();
+        let scheduled = run.scheduled_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let agent_name = run.agent_name.as_deref().unwrap_or("");
         let values = [
             ("{task_name}", task.name.as_str()),
             ("{scheduled_at}", scheduled.as_str()),
-            ("{agent_name}", agent_name.as_str()),
+            ("{agent_name}", agent_name),
             ("{agent}", self.cfg.agent.as_str()),
             ("{multiplexer}", self.cfg.multiplexer.as_str()),
             ("{session}", multiplexer::session(self.cfg)),
         ];
-        let workspace_name = render_template(&task.workspace_name, &values);
-        let tab_name = render_template(&task.tab_name, &values);
-        if task.prompt.is_some() {
-            multiplexer::validate_names(&workspace_name, &tab_name)?;
-            multiplexer::ensure_ready(self.cfg)?;
-        }
-        let next_run = self.timings[&task.name].after(Utc::now())?;
-        let job = self.state.jobs.get_mut(&task.name).unwrap();
-        job.next_run = next_run;
-        job.last_run = Some(Run {
-            scheduled_at,
-            status: "reserved".into(),
-            agent_name: task.prompt.as_ref().map(|_| agent_name.clone()),
-            pane: None,
-            error: None,
-        });
-        self.save()?; // Reserve durably before any task side effect.
         let result = if let Some(prompt) = &task.prompt {
-            let prompt = format!(
-                "Scheduled task {}.\nScheduled occurrence: {scheduled}.\n\n{prompt}\n\nFollow the directory's AGENTS.md instructions.",
-                task.name
-            );
-            let request = multiplexer::LaunchRequest {
-                directory,
-                agent_name: &agent_name,
-                prompt: &prompt,
-                workspace_name: &workspace_name,
-                tab_name: &tab_name,
-            };
-            multiplexer::launch(self.cfg, &request, |pane| {
-                self.state
-                    .jobs
-                    .get_mut(&task.name)
-                    .unwrap()
-                    .last_run
-                    .as_mut()
-                    .unwrap()
-                    .pane = Some(pane.into());
-                self.save()
-            })
+            let workspace_name = render_template(&task.workspace_name, &values);
+            let tab_name = render_template(&task.tab_name, &values);
+            (|| -> Result<()> {
+                multiplexer::validate_names(&workspace_name, &tab_name)?;
+                let prompt = format!(
+                    "Scheduled task {}.\nScheduled occurrence: {scheduled}.\n\n{prompt}\n\nFollow the directory's AGENTS.md instructions. Manage persistent schedules with invocateur schedule --help.",
+                    task.name
+                );
+                multiplexer::launch(
+                    self.cfg,
+                    &multiplexer::LaunchRequest {
+                        directory,
+                        agent_name,
+                        prompt: &prompt,
+                        workspace_name: &workspace_name,
+                        tab_name: &tab_name,
+                    },
+                    |pane| self.store.checkpoint(&task.name, run.id, pane),
+                )
+            })()
         } else {
             run_in_directory(
                 &task.command[0],
@@ -327,30 +581,10 @@ impl<'a> ScheduleTrigger<'a> {
                 }
             })
         };
-        let job = self.state.jobs.get_mut(&task.name).unwrap();
-        let record = job.last_run.as_mut().unwrap();
-        match &result {
-            Ok(()) => {
-                record.status = if task.prompt.is_some() {
-                    "started"
-                } else {
-                    "succeeded"
-                }
-                .into();
-                eprintln!("schedule {}: {} at {scheduled}", task.name, record.status);
-            }
-            Err(error) => {
-                record.status = if task.prompt.is_some() {
-                    "needs-attention"
-                } else {
-                    "failed"
-                }
-                .into();
-                record.error = Some(format!("{error:#}"));
-            }
+        self.store.finish(&task.name, run.id, &result)?;
+        if result.is_ok() {
+            eprintln!("schedule {}: dispatched occurrence {scheduled}", task.name);
         }
-        job.next_run = self.timings[&task.name].after(Utc::now())?;
-        self.save()?;
         result
     }
 }
@@ -359,27 +593,30 @@ impl Trigger for ScheduleTrigger<'_> {
         "schedule"
     }
     fn poll(&mut self) -> Result<()> {
-        let cfg = self.cfg;
         let mut failed = false;
-        for task in cfg.scheduled_tasks.iter().filter(|task| task.enabled) {
-            let job = &self.state.jobs[&task.name];
+        for job in self
+            .store
+            .list()?
+            .into_iter()
+            .filter(|job| job.task.enabled)
+        {
             if job
                 .last_run
                 .as_ref()
-                .is_some_and(|run| matches!(run.status.as_str(), "reserved" | "needs-attention"))
+                .is_some_and(|run| run.status == "needs-attention")
             {
                 eprintln!(
-                    "schedule {} is paused: previous dispatch needs attention; review schedules.json before resuming",
-                    task.name
+                    "schedule {} is paused: review previous work and use schedule resume",
+                    job.task.name
                 );
                 failed = true;
                 continue;
             }
-            if job.next_run > Utc::now() {
+            if job.next_run.is_none_or(|next| next > Utc::now()) {
                 continue;
             }
-            if let Err(error) = self.dispatch(task) {
-                eprintln!("schedule {}: {error:#}", task.name);
+            if let Err(error) = self.dispatch(&job) {
+                eprintln!("schedule {}: {error:#}", job.task.name);
                 failed = true;
             }
         }
@@ -387,7 +624,6 @@ impl Trigger for ScheduleTrigger<'_> {
         Ok(())
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -382,87 +382,99 @@ repos_directory = "~/repos"
 poll_interval_seconds = 60
 ```
 
-## Scheduled tasks
+## Scheduled tasks managed by agents
 
-Schedules work independently of GitHub. Use `github_enabled = false` for a
-schedule-only daemon. Tasks support a cron expression and IANA timezone, or a
-fixed interval in seconds, and run either an agent prompt or literal command argv:
+Agents manage schedules dynamically through the local HTTP API or the
+`invocateur schedule` CLI. Definitions and run state are persisted outside Nix;
+create, update, enable, disable, and delete operations take effect in the running
+service without a restart. New installations start with no schedules.
+
+The service configuration remains TOML. API resources, task input files, and CLI
+output use JSON. Nix and TOML configure only the service, such as the API address,
+agent, multiplexer, and polling intervals. Jobs are not declared in either file.
+
+With the service running, create an agent task:
+
+```bash
+invocateur schedule create weekday-review \
+  --cron '0 9 * * MON-FRI' --timezone America/New_York \
+  --directory ~/repos/my-project \
+  --prompt 'Review recent changes and follow AGENTS.md.'
+```
+
+Create a command task; everything after `--` is literal command argv:
+
+```bash
+invocateur schedule create fetch-updates \
+  --every-seconds 3600 --directory ~/repos/my-project \
+  -- git fetch --all
+```
+
+Read and modify schedules:
+
+```bash
+invocateur schedule list
+invocateur schedule get weekday-review
+invocateur schedule update weekday-review --cron '0 10 * * MON-FRI'
+invocateur schedule disable weekday-review
+invocateur schedule enable weekday-review
+invocateur schedule delete weekday-review
+```
+
+`create --file task.json` accepts a task object; `update NAME --file patch.json`
+accepts a partial task object. Use `--file -` to read JSON from stdin.
+`replace NAME --file task.json` replaces a definition. Output is always JSON,
+and CLI edits use the resource revision to prevent concurrent lost updates.
+See `invocateur schedule --help` and the [HTTP API reference](docs/api.md).
+
+The API defaults to `http://127.0.0.1:7639`. Its address and private token are
+discovered automatically from `$XDG_STATE_HOME/invocateur/api.json` and
+`api-token` (normally under `~/.local/state/invocateur`). Pass
+`invocateur --state-dir /path schedule ...` for another service state directory,
+or use `--url` and `--token-file`. The environment variables
+`INVOCATEUR_API_URL` and `INVOCATEUR_API_TOKEN` are also supported.
+The CLI talks to the API, so the service must be running.
+
+Service settings, if needed:
 
 ```toml
+api_enabled = true
+api_listen = "127.0.0.1:7639"
+schedule_check_interval_seconds = 1
+# Disable the GitHub trigger for an API/schedule-only service:
 github_enabled = false
-
-[[scheduled_tasks]]
-name = "weekday-review"
-cron = "0 9 * * MON-FRI"
-timezone = "America/New_York"
-directory = "~/repos/my-project"
-prompt = "Review recent changes and suggest improvements. Follow AGENTS.md."
-
-[[scheduled_tasks]]
-name = "fetch-updates"
-every_seconds = 3600
-directory = "~/repos/my-project"
-command = ["git", "fetch", "--all"]
-timeout_seconds = 120
 ```
 
-With Home Manager:
+`services.invocateur.apiEnabled`, `apiListen`, and `scheduleCheckInterval` expose
+the same controls in Home Manager. A new profile does not replace the schedule
+store. Keep executables needed by tasks in the service's PATH; Nix users can add
+them with `services.invocateur.extraPackages`.
 
-```nix
-services.invocateur = {
-  enable = true;
-  githubEnabled = false;
-  scheduledTasks = [
-    {
-      name = "weekday-review";
-      cron = "0 9 * * MON-FRI";
-      timezone = "America/New_York";
-      directory = "~/repos/my-project";
-      prompt = "Review recent changes and suggest improvements. Follow AGENTS.md.";
-    }
-    {
-      name = "fetch-updates";
-      everySeconds = 3600;
-      directory = "~/repos/my-project";
-      command = [ "git" "fetch" "--all" ];
-      commandTimeout = 120;
-    }
-  ];
-};
-```
+Each task needs a unique `name`. Enabled tasks require exactly one of
+`cron` / `every_seconds` and exactly one of `prompt` / `command`. Cron uses an IANA timezone (default `UTC`);
+intervals wait until the previous dispatch finishes before counting down again.
+The directory defaults to `repos_directory` and must already exist; scheduled
+tasks do not clone repositories. Agent tasks use the service's configured agent,
+arguments, multiplexer, and existing session.
 
-Every task needs a unique `name`, exactly one of `cron` / `every_seconds`, and
-exactly one of `prompt` / `command`. The timezone defaults to `UTC`, and the
-working directory defaults to `repos_directory`. No clone or repository lookup
-is performed for scheduled tasks; the directory must already exist.
+New tasks first run at the next cron time or after one interval. Pass
+`--run-immediately` on create or update to make the next occurrence due now.
+Missed occurrences coalesce into one run, and restarts do not replay the same
+occurrence. The scheduler checks for dynamic changes every second by default,
+independently of GitHub polling. Schedules are machine-local.
 
-Agent tasks use your configured agent, arguments, multiplexer, and existing
-session. Their optional `workspace_name` and `tab_name` templates support
-`{task_name}`, `{scheduled_at}`, `{agent_name}`, `{agent}`, `{multiplexer}`, and
-`{session}`. Defaults are `{task_name} {scheduled_at}` and `{agent_name}`.
-Command tasks do not require a multiplexer or agent. Their arguments are passed
-literally; explicitly use `["sh", "-c", "..."]` when you want shell syntax.
-Commands run to completion under `timeout_seconds` (default: the service command
-timeout). A timeout kills the command's process group, including subprocesses.
-Long commands can delay other polling; agent sessions continue in the background.
+The API remains responsive while tasks execute. Edits and deletion of a task
+currently dispatching return HTTP 409; retry after dispatch finishes. Other tasks
+can be created and edited meanwhile. Command tasks run serially, with a timeout
+that kills their process group. Long commands can delay polling and dispatch;
+agent sessions continue in the background and may overlap future occurrences.
 
-New tasks first run at the next cron time or after one interval. Set
-`run_on_startup = true` / `runOnStartup = true` to run a new task immediately.
-This applies once when the task name first enters state, not on every restart.
-Intervals wait until the previous dispatch finishes before counting down again.
-Cron uses local wall-clock time in the configured timezone; delayed or missed
-occurrences coalesce into one run, and no burst of missed work is replayed.
-Schedule checks default to every second (`schedule_check_interval_seconds` /
-`scheduleCheckInterval`), independently of GitHub's polling interval.
-
-State in `schedules.json` is reserved before dispatch, preventing a restart from
-replaying the same occurrence. Commands run serially in this service. Agent tasks
-may leave sessions running across future occurrences. An interrupted or ambiguous
-dispatch is paused with a diagnostic until reviewed; inspect `last_run` and the
-process or pane, then remove only that job's state entry after resolving it.
-Failed completed commands wait for the next scheduled occurrence. Schedules are
-machine-local; machines with separate state each run their configured tasks.
-Set `enabled = false` / `enable = false` on a task to disable it.
+Interrupted or ambiguous dispatches pause with `needs-attention`. Inspect the
+resource's `last_run` and the process or pane, then use
+`invocateur schedule resume NAME` after resolving the previous work. Resume
+schedules a future occurrence; it does not replay the interrupted one. Failed
+completed commands wait for their next occurrence. Deleting a schedule removes
+future work and its stored history; it does not cancel an agent already running.
 
 ## Triggers
 

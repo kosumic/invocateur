@@ -726,11 +726,12 @@ fn poll_repo(
         let (workspace_name, tab_name) =
             multiplexer::names(client.0, repo, number, &name, comment.id)?;
         let prompt = format!(
-            "Work on GitHub issue or pull request {repo}#{number}.\nComment: {}\n\nTitle: {}\n\nIssue/PR description:\n{}\n\nInstructions from {login}:\n{}\n\nFollow the repository's AGENTS.md instructions. Mention {repo}#{number} in any commit you make.",
+            "Work on GitHub issue or pull request {repo}#{number}.\nComment: {}\n\nTitle: {}\n\nIssue/PR description:\n{}\n\nInstructions from {login}:\n{}\n\nFollow the repository's AGENTS.md instructions. Mention {repo}#{number} in any commit you make.\n\n{}",
             comment.html_url,
             excerpt(issue["title"].as_str().unwrap_or("")),
             excerpt(issue["body"].as_str().unwrap_or("")),
-            excerpt(&instruction)
+            excerpt(&instruction),
+            crate::schedule_instructions(state_file.parent().unwrap())
         );
         state.repositories.get_mut(&key).unwrap().launches.insert(
             id.clone(),

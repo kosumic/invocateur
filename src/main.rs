@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod api;
+mod cli;
 mod multiplexer;
 mod triggers;
 use multiplexer::Multiplexer;
@@ -21,7 +23,8 @@ use triggers::github::valid_repo;
 #[serde(default, deny_unknown_fields)]
 struct Config {
     github_enabled: bool,
-    scheduled_tasks: Vec<triggers::schedule::Task>,
+    api_enabled: bool,
+    api_listen: String,
     schedule_check_interval_seconds: u64,
     multiplexer: Multiplexer,
     workspace_name: String,
@@ -55,7 +58,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             github_enabled: true,
-            scheduled_tasks: vec![],
+            api_enabled: true,
+            api_listen: "127.0.0.1:7639".into(),
             schedule_check_interval_seconds: 1,
             multiplexer: Multiplexer::Herdr,
             workspace_name: "{repository}#{issue_number} {agent_name}".into(),
@@ -164,11 +168,14 @@ impl Config {
             cfg.schedule_check_interval_seconds > 0,
             "schedule check interval must be positive"
         );
-        triggers::schedule::validate(
-            &mut cfg.scheduled_tasks,
-            &cfg.repos_directory,
-            cfg.command_timeout_seconds,
-        )?;
+        let address: std::net::SocketAddr = cfg
+            .api_listen
+            .parse()
+            .context("api_listen must be an IP address and port")?;
+        ensure!(
+            address.ip().is_loopback(),
+            "the local schedule API must listen on a loopback address"
+        );
         Ok(cfg)
     }
 }
@@ -282,6 +289,13 @@ fn render_template(template: &str, values: &[(&str, &str)]) -> String {
         .collect()
 }
 
+fn schedule_instructions(directory: &Path) -> String {
+    format!(
+        "When the user requests scheduling, manage persistent schedules through invocateur schedule --help (create, list, get, update, delete). This service's state directory is {}. Supply it using --state-dir before schedule when needed. Changes take effect without restarting the service.",
+        directory.display()
+    )
+}
+
 fn main() -> Result<()> {
     let mut config_path = None;
     let mut state_dir = None;
@@ -290,6 +304,8 @@ fn main() -> Result<()> {
     let mut argv = env::args().skip(1);
     while let Some(arg) = argv.next() {
         match arg.as_str() {
+            "serve" => {}
+            "schedule" | "schedules" => return cli::run(argv.collect(), state_dir),
             "--config" => {
                 config_path = Some(PathBuf::from(argv.next().context("--config needs a path")?))
             }
@@ -302,7 +318,7 @@ fn main() -> Result<()> {
             "--check-config" => check = true,
             "--help" | "-h" => {
                 println!(
-                    "invocateur --config FILE [--state-dir DIRECTORY] [--once | --check-config]\n\nRun GitHub comment triggers and scheduled agent or command tasks. Config format: TOML."
+                    "invocateur serve --config FILE [--state-dir DIRECTORY] [--once | --check-config]\ninvocateur schedule --help\n\nRun GitHub comment triggers and scheduled agent or command tasks. Config format: TOML."
                 );
                 return Ok(());
             }
@@ -316,11 +332,13 @@ fn main() -> Result<()> {
             println!("GitHub trigger: @{}", cfg.bot_name);
         }
         println!(
-            "{} scheduled task(s)",
-            cfg.scheduled_tasks
-                .iter()
-                .filter(|task| task.enabled)
-                .count()
+            "Schedule API: {} ({})",
+            cfg.api_listen,
+            if cfg.api_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
         );
         return Ok(());
     }
@@ -345,12 +363,23 @@ fn main() -> Result<()> {
             Duration::from_secs(cfg.poll_interval_seconds),
         ));
     }
-    if cfg.scheduled_tasks.iter().any(|task| task.enabled) {
-        active_triggers.push(triggers::Registration::new(
-            Box::new(triggers::schedule::ScheduleTrigger::new(&cfg, &state_dir)?),
-            Duration::from_secs(cfg.schedule_check_interval_seconds),
-        ));
-    }
+    let schedule_store = std::sync::Arc::new(triggers::schedule::Store::open(&cfg, &state_dir)?);
+    let _api = if cfg.api_enabled && !once {
+        Some(api::Server::start(
+            &cfg.api_listen,
+            &state_dir,
+            schedule_store.clone(),
+        )?)
+    } else {
+        None
+    };
+    active_triggers.push(triggers::Registration::new(
+        Box::new(triggers::schedule::ScheduleTrigger::new(
+            &cfg,
+            schedule_store,
+        )),
+        Duration::from_secs(cfg.schedule_check_interval_seconds),
+    ));
     loop {
         let result = triggers::poll_all(&mut active_triggers);
         if once {
