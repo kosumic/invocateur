@@ -33,6 +33,7 @@ struct Config {
     use_hostname_as_bot_name: bool,
     agent: String,
     agent_args: Vec<String>,
+    prefix_github_comments: bool,
     acknowledgement_message: String,
     repos_directory: PathBuf,
     repositories: BTreeMap<String, PathBuf>,
@@ -68,6 +69,7 @@ impl Default for Config {
             use_hostname_as_bot_name: false,
             agent: "codex".into(),
             agent_args: vec![],
+            prefix_github_comments: true,
             acknowledgement_message:
                 "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}.".into(),
             repos_directory: "~/repos".into(),

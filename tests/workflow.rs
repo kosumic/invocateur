@@ -357,6 +357,30 @@ fn own_mentions_only_paginated_and_deduplicated_across_restarts() {
 }
 
 #[test]
+fn github_comment_prefix_instruction_can_be_disabled_for_every_backend() {
+    for backend in ["herdr", "tmux", "zellij"] {
+        let f = Fixture::new();
+        let mut config = json!({"multiplexer":backend,"prefix_github_comments":false});
+        if backend != "herdr" {
+            config["agent"] = json!(MOCK_TOOLS.get().unwrap().join("agent"));
+        }
+        f.config(config);
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(1, "alice", "@invo Do the work")]]),
+        );
+        f.success();
+        assert_eq!(f.launches(), 1, "{backend}");
+        assert_eq!(f.acknowledgements(), 1, "{backend}");
+        assert_eq!(
+            fs::read_to_string(f.root.join("prompts")).unwrap(),
+            "Work on it: https://github.com/alice/project/issues/42#issuecomment-1\n",
+            "{backend}"
+        );
+    }
+}
+
+#[test]
 fn configurable_mention_agent_arguments_directory_and_interval() {
     let f = Fixture::new();
     fs::create_dir_all(f.root.join("custom/repos/project/.git")).unwrap();
@@ -1691,6 +1715,27 @@ fn dynamically_created_agents_start_without_restarts_and_are_not_replayed() {
         api_ok(&f, "GET", "/v1/schedules/review", None)["last_run"]["status"],
         "started"
     );
+}
+
+#[test]
+fn scheduled_agents_can_disable_the_github_comment_prefix_instruction() {
+    let f = Fixture::new();
+    f.config(json!({"github_enabled":false,"prefix_github_comments":false}));
+    let _daemon = start_api(&f);
+    api_ok(
+        &f,
+        "POST",
+        "/v1/schedules",
+        Some(
+            json!({"name":"review","every_seconds":3600,"run_immediately":true,
+            "directory":f.root.join("checkout"),"prompt":"Review recent changes."}),
+        ),
+    );
+    wait_status(&f, "review", "started");
+    let prompt = fs::read_to_string(f.root.join("prompts")).unwrap();
+    assert!(prompt.contains("Review recent changes."));
+    assert!(!prompt.contains("When posting a new comment on GitHub"));
+    assert_eq!(f.launches(), 1);
 }
 
 #[test]

@@ -23,6 +23,7 @@
     workspace_name = cfg.workspaceName;
     tab_name = cfg.tabName;
     agent_args = cfg.agentArgs;
+    prefix_github_comments = cfg.prefixGithubComments;
     acknowledgement_message = cfg.acknowledgementMessage;
     repos_directory = cfg.reposDirectory;
     discover_repositories = cfg.discoverRepositories;
@@ -130,6 +131,11 @@ in {
       type = types.listOf types.str;
       default = [];
       description = "Native agent arguments. tmux and Zellij append the task as the final positional argument.";
+    };
+    prefixGithubComments = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Instruct launched agents to prefix new GitHub comments with their agent instance name followed by a colon.";
     };
     acknowledgementMessage = mkOption {
       type = types.str;

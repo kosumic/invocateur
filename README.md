@@ -30,6 +30,7 @@ tab_name = "{agent_name}"
 bot_name = "invo"
 use_hostname_as_bot_name = false
 agent = "codex"
+prefix_github_comments = true
 repos_directory = "~/repos"
 poll_interval_seconds = 60
 acknowledgement_message = "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}."
@@ -193,6 +194,7 @@ services.invocateur = {
   useHostnameAsBotName = false;
   agent = "codex";
   agentArgs = [];
+  prefixGithubComments = true;
   acknowledgementMessage = "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}.";
   reposDirectory = "${config.home.homeDirectory}/repos";
   pollInterval = 60; # seconds between completed polls
@@ -312,6 +314,21 @@ agents and all multiplexer backends, using each launch's own agent name. It is
 independent of the bot mention, agent program, and configurable workspace/tab names.
 The agent reads the issue or PR and your instructions from GitHub; Invo does not
 fetch or paste the title, description, or comment text into the launch prompt.
+
+The comment-prefix instruction is enabled by default. To disable it in TOML:
+
+```toml
+prefix_github_comments = false
+```
+
+Or with Home Manager:
+
+```nix
+services.invocateur.prefixGithubComments = false;
+```
+
+Restart or upgrade the service after changing this setting; it applies to agents
+launched afterward.
 
 The service searches for your recently updated conversations and reviews across
 GitHub and inspects their repositories. Set `discoverGithubRepositories = false`

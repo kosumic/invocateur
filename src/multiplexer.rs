@@ -130,10 +130,14 @@ pub fn launch(
     request: &LaunchRequest<'_>,
     mut checkpoint: impl FnMut(&LaunchTarget) -> Result<()>,
 ) -> Result<LaunchResponse> {
-    let prompt = format!(
-        "{}\n\nWhen posting a new comment on GitHub, start its body with \"{}:\".",
-        request.prompt, request.agent_name
-    );
+    let prompt = if cfg.prefix_github_comments {
+        format!(
+            "{}\n\nWhen posting a new comment on GitHub, start its body with \"{}:\".",
+            request.prompt, request.agent_name
+        )
+    } else {
+        request.prompt.to_owned()
+    };
     let target = match cfg.multiplexer {
         Multiplexer::Herdr => {
             let client = herdr::Client::new(cfg);
