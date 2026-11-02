@@ -14,9 +14,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod multiplexer;
+use multiplexer::Multiplexer;
+
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Config {
+    multiplexer: Multiplexer,
+    workspace_name: String,
+    tab_name: String,
     spells: Vec<String>,
     agent: String,
     agent_args: Vec<String>,
@@ -30,9 +36,13 @@ struct Config {
     initial_lookback_seconds: u32,
     review_comments: bool,
     herdr_session: String,
+    tmux_session: String,
+    zellij_session: String,
     github_host: String,
     gh_path: String,
     herdr_path: String,
+    tmux_path: String,
+    zellij_path: String,
     git_path: String,
     command_timeout_seconds: u64,
 }
@@ -40,6 +50,9 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            multiplexer: Multiplexer::Herdr,
+            workspace_name: "{repository}#{issue_number} {agent_name}".into(),
+            tab_name: "{agent_name}".into(),
             spells: vec!["summon".into()],
             agent: "codex".into(),
             agent_args: vec![],
@@ -54,9 +67,13 @@ impl Default for Config {
             initial_lookback_seconds: 0,
             review_comments: true,
             herdr_session: "default".into(),
+            tmux_session: "invocateur".into(),
+            zellij_session: "invocateur".into(),
             github_host: "github.com".into(),
             gh_path: "gh".into(),
             herdr_path: "herdr".into(),
+            tmux_path: "tmux".into(),
+            zellij_path: "zellij".into(),
             git_path: "git".into(),
             command_timeout_seconds: 90,
         }
@@ -68,6 +85,12 @@ impl Config {
         let mut cfg: Self = serde_json::from_slice(&fs::read(path)?)
             .with_context(|| format!("invalid config {}", path.display()))?;
         ensure!(!cfg.spells.is_empty(), "configure at least one spell");
+        for template in [&cfg.workspace_name, &cfg.tab_name] {
+            ensure!(
+                !template.trim().is_empty() && !template.chars().any(char::is_control),
+                "workspace_name and tab_name must be nonempty single-line templates"
+            );
+        }
         ensure!(
             !cfg.acknowledgement_message.trim().is_empty()
                 && cfg.acknowledgement_message.len() <= 60_000,
@@ -91,6 +114,15 @@ impl Config {
             !cfg.agent.is_empty() && !cfg.herdr_session.is_empty(),
             "agent and Herdr session cannot be empty"
         );
+        for session in [&cfg.tmux_session, &cfg.zellij_session] {
+            ensure!(
+                !session.is_empty()
+                    && session
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)),
+                "tmux_session and zellij_session must use letters, digits, underscores, or hyphens"
+            );
+        }
         ensure!(
             !cfg.github_host.is_empty()
                 && cfg
@@ -164,6 +196,11 @@ fn run(program: &str, args: &[String], timeout: u64) -> Result<String> {
         .env_remove("HERDR_WORKSPACE_ID")
         .env_remove("HERDR_TAB_ID")
         .env_remove("HERDR_PANE_ID")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("ZELLIJ")
+        .env_remove("ZELLIJ_SESSION_NAME")
+        .env_remove("ZELLIJ_PANE_ID")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -207,6 +244,20 @@ fn run(program: &str, args: &[String], timeout: u64) -> Result<String> {
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|s| (*s).into()).collect()
+}
+
+fn render_template(template: &str, values: &[(&str, &str)]) -> String {
+    template
+        .split_inclusive('}')
+        .map(|part| {
+            for (placeholder, value) in values {
+                if let Some(prefix) = part.strip_suffix(placeholder) {
+                    return format!("{prefix}{value}");
+                }
+            }
+            part.to_owned()
+        })
+        .collect()
 }
 
 struct Client<'a>(&'a Config);
@@ -290,6 +341,8 @@ impl Client<'_> {
                     ("{comment_url}", comment_url),
                     ("{repository}", repo),
                     ("{issue_number}", &number.to_string()),
+                    ("{multiplexer}", self.0.multiplexer.as_str()),
+                    ("{session}", multiplexer::session(self.0)),
                 ] {
                     if let Some(prefix) = part.strip_suffix(placeholder) {
                         return format!("{prefix}{value}");
@@ -439,7 +492,9 @@ struct State {
 struct AccountState {
     not_before: DateTime<Utc>,
     cursor: DateTime<Utc>,
-    discovered_repositories: BTreeSet<String>,
+    // Retain the original on-disk key so older state files and rollbacks remain readable.
+    #[serde(rename = "discovered_repositories")]
+    pending_repositories: BTreeSet<String>,
 }
 #[derive(Deserialize, Serialize)]
 struct RepoState {
@@ -458,6 +513,14 @@ struct Launch {
     acknowledgement_url: Option<String>,
     #[serde(default)]
     acknowledgement_error: Option<String>,
+    #[serde(default)]
+    multiplexer: Multiplexer,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    workspace_name: Option<String>,
+    #[serde(default)]
+    tab_name: Option<String>,
 }
 
 fn save(path: &Path, state: &State) -> Result<()> {
@@ -534,7 +597,7 @@ fn discover_github(
         AccountState {
             not_before: start,
             cursor: start,
-            discovered_repositories: BTreeSet::new(),
+            pending_repositories: BTreeSet::new(),
         }
     });
     let not_before = account.not_before;
@@ -583,7 +646,7 @@ fn discover_github(
             });
     }
     let account = state.accounts.get_mut(&key).unwrap();
-    account.discovered_repositories.extend(repositories);
+    account.pending_repositories.extend(repositories);
     account.cursor = poll_started;
     save(state_file, state)
 }
@@ -675,47 +738,6 @@ fn excerpt(text: &str) -> &str {
     &text[..end]
 }
 
-fn launch(
-    client: &Client<'_>,
-    repo: &str,
-    directory: &Path,
-    number: u64,
-    name: &str,
-    prompt: &str,
-    mut checkpoint: impl FnMut(&str) -> Result<()>,
-) -> Result<()> {
-    let workspace = client.herdr(&args(&[
-        "workspace",
-        "create",
-        "--cwd",
-        &directory.to_string_lossy(),
-        "--label",
-        &format!("{repo}#{number} {name}"),
-        "--no-focus",
-    ]))?;
-    let pane = workspace
-        .pointer("/result/root_pane/pane_id")
-        .and_then(Value::as_str)
-        .context("Herdr did not return a root pane ID")?;
-    checkpoint(pane)?;
-    let mut start = args(&[
-        "agent",
-        "start",
-        name,
-        "--kind",
-        &client.0.agent,
-        "--pane",
-        pane,
-    ]);
-    if !client.0.agent_args.is_empty() {
-        start.push("--".into());
-        start.extend(client.0.agent_args.clone());
-    }
-    client.herdr(&start)?;
-    client.herdr(&args(&["agent", "prompt", name, prompt]))?;
-    Ok(())
-}
-
 fn poll_repo(
     client: &Client<'_>,
     state: &mut State,
@@ -767,10 +789,12 @@ fn poll_repo(
         };
         let number = issue_number(&comment)?;
         let issue: Value = client.gh(&format!("repos/{repo}/issues/{number}"), false)?;
-        client.checkout(repo, directory)?;
         // Readiness is checked before reserving: an unavailable server can safely be retried.
-        client.herdr(&args(&["workspace", "list"]))?;
+        multiplexer::ensure_ready(client.0)?;
+        client.checkout(repo, directory)?;
         let name = format!("gh-{id}");
+        let (workspace_name, tab_name) =
+            multiplexer::names(client.0, repo, number, &name, comment.id)?;
         let prompt = format!(
             "Work on GitHub issue or pull request {repo}#{number}.\nComment: {}\n\nTitle: {}\n\nIssue/PR description:\n{}\n\nInstructions from {login}:\n{}\n\nFollow the repository's AGENTS.md instructions. Mention {repo}#{number} in any commit you make.",
             comment.html_url,
@@ -788,6 +812,10 @@ fn poll_repo(
                 error: None,
                 acknowledgement_url: None,
                 acknowledgement_error: None,
+                multiplexer: client.0.multiplexer,
+                session: Some(multiplexer::session(client.0).to_owned()),
+                workspace_name: Some(workspace_name.clone()),
+                tab_name: Some(tab_name.clone()),
             },
         );
         // Persist BEFORE mutation. A crash or ambiguous failure must never silently launch twice.
@@ -805,7 +833,14 @@ fn poll_repo(
                 .unwrap()
                 .status = "claimed".into();
             save(state_file, state)?;
-            launch(client, repo, directory, number, &name, &prompt, |pane| {
+            let request = multiplexer::LaunchRequest {
+                directory,
+                agent_name: &name,
+                prompt: &prompt,
+                workspace_name: &workspace_name,
+                tab_name: &tab_name,
+            };
+            multiplexer::launch(client.0, &request, |pane| {
                 state
                     .repositories
                     .get_mut(&key)
@@ -838,7 +873,7 @@ fn poll_repo(
                 record.status = "needs-attention".into();
                 record.error = Some(format!("{error:#}"));
                 eprintln!(
-                    "{} needs attention: {error:#}; inspect Herdr and {} before retrying",
+                    "{} needs attention: {error:#}; inspect the multiplexer and {} before retrying",
                     comment.html_url,
                     state_file.display()
                 );
@@ -890,7 +925,7 @@ fn main() -> Result<()> {
             "--check-config" => check = true,
             "--help" | "-h" => {
                 println!(
-                    "invocateur --config FILE [--state-dir DIRECTORY] [--once | --check-config]\n\nPoll your GitHub comments and start coding agents in Herdr. Config format: JSON."
+                    "invocateur --config FILE [--state-dir DIRECTORY] [--once | --check-config]\n\nPoll your GitHub comments and start coding agents in Herdr, tmux, or Zellij. Config format: JSON."
                 );
                 return Ok(());
             }
@@ -927,32 +962,53 @@ fn main() -> Result<()> {
     loop {
         let result = (|| -> Result<()> {
             let user: User = client.gh("user", false)?;
-            let mut repos = client.repositories()?;
             let mut failed = false;
+            let mut pending = BTreeSet::new();
             if cfg.discover_github_repositories {
                 if let Err(error) = discover_github(&client, &mut state, &state_file, &user.login) {
                     eprintln!("GitHub repository discovery: {error:#}");
                     failed = true;
                 }
                 if let Some(account) = state.accounts.get(&account_key(&client, &user.login)) {
-                    for repo in &account.discovered_repositories {
-                        if !repos
-                            .keys()
-                            .any(|existing| existing.eq_ignore_ascii_case(repo))
-                        {
-                            repos.insert(repo.clone(), cfg.repos_directory.join(repo));
-                        }
-                    }
+                    pending = account.pending_repositories.clone();
                 }
             }
+            let watched: BTreeSet<_> = cfg
+                .repositories
+                .keys()
+                .chain(pending.iter())
+                .map(|repo| repo.to_ascii_lowercase())
+                .collect();
+            // In global mode local checkouts are a path catalog, not an API polling list.
+            // Avoid scanning the catalog altogether while there is no pending or explicit work.
+            let mut repos = if cfg.discover_github_repositories && watched.is_empty() {
+                BTreeMap::new()
+            } else {
+                client.repositories()?
+            };
+            if cfg.discover_github_repositories {
+                for repo in &pending {
+                    if !repos
+                        .keys()
+                        .any(|existing| existing.eq_ignore_ascii_case(repo))
+                    {
+                        repos.insert(repo.clone(), cfg.repos_directory.join(repo));
+                    }
+                }
+                repos.retain(|repo, _| watched.contains(&repo.to_ascii_lowercase()));
+            }
             if repos.is_empty() {
-                eprintln!(
-                    "no repositories configured or found under {}",
-                    cfg.repos_directory.display()
-                );
+                if cfg.discover_github_repositories {
+                    eprintln!("poll complete: no updated GitHub conversations");
+                } else {
+                    eprintln!(
+                        "no repositories configured or found under {}",
+                        cfg.repos_directory.display()
+                    );
+                }
             }
             for (repo, directory) in repos {
-                if let Err(error) = poll_repo(
+                match poll_repo(
                     &client,
                     &mut state,
                     &state_file,
@@ -960,8 +1016,20 @@ fn main() -> Result<()> {
                     &repo,
                     &directory,
                 ) {
-                    eprintln!("{repo}: {error:#}");
-                    failed = true;
+                    Ok(()) => {
+                        if let Some(account) =
+                            state.accounts.get_mut(&account_key(&client, &user.login))
+                        {
+                            account
+                                .pending_repositories
+                                .retain(|pending| !pending.eq_ignore_ascii_case(&repo));
+                        }
+                        save(&state_file, &state)?;
+                    }
+                    Err(error) => {
+                        eprintln!("{repo}: {error:#}");
+                        failed = true;
+                    }
                 }
             }
             ensure!(!failed, "one or more repositories could not be polled");

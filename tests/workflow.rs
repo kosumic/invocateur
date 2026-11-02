@@ -128,7 +128,11 @@ case "$1 $2" in
   'workspace create')
     printf 'workspace\n' >> "$FIXTURE/launches"
     printf '%s\n' "$@" >> "$FIXTURE/workspace-args"
-    printf '{"result":{"root_pane":{"pane_id":"w7:p9"}}}' ;;
+    printf '{"result":{"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"w7:p9"}}}' ;;
+  'tab rename')
+    test "$3" = w7:t1 || exit 2
+    printf '%s\n' "$4" >> "$FIXTURE/tab-names"
+    printf '{"result":{}}' ;;
   'agent start')
     printf '%s\n' "$@" >> "$FIXTURE/start-args"
     if test -f "$FIXTURE/agent-fails"; then echo 'agent_not_ready' >&2; exit 1; fi
@@ -140,6 +144,62 @@ case "$1 $2" in
 esac
 "#,
             ),
+            ("agent", r#"
+printf '%s\0' "$@" > "$FIXTURE/agent-argv"
+printf '%s\n' "$PWD" > "$FIXTURE/agent-cwd"
+for argument do last="$argument"; done
+printf '%s\n' "$last" >> "$FIXTURE/prompts"
+"#),
+            ("tmux", r#"
+case "$1" in
+  has-session)
+    test "$2" = '-t' && test "$3" = '=test-tmux' || exit 2
+    test ! -f "$FIXTURE/server-down"
+    exit $? ;;
+  new-window)
+    printf '%s\n' "$@" > "$FIXTURE/multiplexer-args"
+    test ! -f "$FIXTURE/multiplexer-fails" || exit 1
+    shift
+    directory=
+    while test "$#" -gt 0; do
+      case "$1" in
+        --) shift; break ;;
+        -c) directory="$2"; shift 2 ;;
+        -d|-P) shift ;;
+        *) shift 2 ;;
+      esac
+    done
+    printf 'tmux\n' >> "$FIXTURE/launches"
+    (cd "$directory" && "$@")
+    printf '%%7\n' ;;
+  *) exit 2 ;;
+esac
+"#),
+            ("zellij", r#"
+test "$1" = '--session' && test "$2" = 'test-zellij' && test "$3" = action || exit 2
+case "$4" in
+  query-tab-names)
+    test ! -f "$FIXTURE/server-down" || exit 1
+    printf 'existing-tab\n' ;;
+  new-tab)
+    printf '%s\n' "$@" > "$FIXTURE/multiplexer-args"
+    test ! -f "$FIXTURE/multiplexer-fails" || exit 1
+    shift 4
+    directory=
+    while test "$#" -gt 0; do
+      case "$1" in
+        --) shift; break ;;
+        --cwd) directory="$2"; shift 2 ;;
+        --no-focus) shift ;;
+        *) shift 2 ;;
+      esac
+    done
+    printf 'zellij\n' >> "$FIXTURE/launches"
+    (cd "$directory" && "$@")
+    printf '3\n' ;;
+  *) exit 2 ;;
+esac
+"#),
         ] {
             let path = directory.join(name);
             fs::write(&path, format!("#!{}\nset -eu\n{script}\n", shell.display())).unwrap();
@@ -163,6 +223,10 @@ esac
             "gh_path": MOCK_TOOLS.get().unwrap().join("gh"),
             "git_path": MOCK_TOOLS.get().unwrap().join("git"),
             "herdr_path": MOCK_TOOLS.get().unwrap().join("herdr"),
+            "tmux_path": MOCK_TOOLS.get().unwrap().join("tmux"),
+            "zellij_path": MOCK_TOOLS.get().unwrap().join("zellij"),
+            "tmux_session": "test-tmux",
+            "zellij_session": "test-zellij",
         });
         cfg.as_object_mut()
             .unwrap()
@@ -250,6 +314,15 @@ fn own_standalone_spells_only_paginated_and_deduplicated_across_restarts() {
     );
     let start = fs::read_to_string(f.root.join("start-args")).unwrap();
     assert!(start.contains("codex") && start.contains("w7:p9"));
+    assert_eq!(
+        fs::read_to_string(f.root.join("tab-names")).unwrap(),
+        "gh-i-6\n"
+    );
+    assert!(
+        fs::read_to_string(f.root.join("workspace-args"))
+            .unwrap()
+            .contains("alice/project#42 gh-i-6")
+    );
     assert_eq!(f.acknowledgements(), 1);
     let ack = fs::read_to_string(f.root.join("ack-1.txt")).unwrap();
     assert!(ack.contains("Invocateur started codex") && ack.contains("#issuecomment-6"));
@@ -681,4 +754,253 @@ fn an_unquoted_spell_after_a_quote_or_example_still_summons() {
             .unwrap()
             .contains("Fix the actual issue.")
     );
+}
+
+#[test]
+fn herdr_workspace_and_tab_names_are_configurable_templates() {
+    let f = Fixture::new();
+    f.config(
+        json!({"workspace_name":"Work on {repository}#{issue_number}",
+        "tab_name":"{agent}-{agent_name}-{comment_id}-{multiplexer}-{session}"}),
+    );
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "summon")]]),
+    );
+    f.success();
+    assert!(
+        fs::read_to_string(f.root.join("workspace-args"))
+            .unwrap()
+            .contains("Work on alice/project#42")
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("tab-names")).unwrap(),
+        "codex-gh-i-1-1-herdr-test-session\n"
+    );
+    let state = f.state();
+    let record = &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"];
+    assert_eq!(record["workspace_name"], "Work on alice/project#42");
+    assert_eq!(record["tab_name"], "codex-gh-i-1-1-herdr-test-session");
+}
+
+#[test]
+fn tmux_and_zellij_launch_native_agents_with_literal_arguments_and_names() {
+    for (backend, target) in [("tmux", "%7"), ("zellij", "tab:3")] {
+        let f = Fixture::new();
+        let injected = f.root.join("must-not-exist");
+        let task = format!(
+            "Do not execute $(touch {}) or `touch {}`.\nKeep this apostrophe: ' and this semicolon: ;",
+            injected.display(),
+            injected.display()
+        );
+        f.config(
+            json!({"multiplexer":backend, "agent":MOCK_TOOLS.get().unwrap().join("agent"),
+            "agent_args":["--model", "a model with spaces", "literal ' \" $HOME ;"],
+            "tab_name":"Review {repository}#{issue_number}",
+            "acknowledgement_message":"Working through {multiplexer} in {session}: {comment_url}"}),
+        );
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(1, "alice", &format!("summon\n{task}"))]]),
+        );
+        f.success();
+        assert_eq!(f.launches(), 1, "{backend}");
+        assert_eq!(f.acknowledgements(), 1, "{backend}");
+        assert!(
+            !injected.exists(),
+            "task text was interpreted as a shell command"
+        );
+        let bytes = fs::read(f.root.join("agent-argv")).unwrap();
+        let argv: Vec<_> = bytes
+            .split(|byte| *byte == 0)
+            .filter(|value| !value.is_empty())
+            .map(|value| std::str::from_utf8(value).unwrap())
+            .collect();
+        assert_eq!(
+            &argv[..3],
+            ["--model", "a model with spaces", "literal ' \" $HOME ;"]
+        );
+        assert!(argv.last().unwrap().contains(&task));
+        let cwd = fs::read_to_string(f.root.join("agent-cwd")).unwrap();
+        assert_eq!(
+            fs::canonicalize(cwd.trim()).unwrap(),
+            fs::canonicalize(f.root.join("checkout")).unwrap()
+        );
+        assert!(
+            fs::read_to_string(f.root.join("multiplexer-args"))
+                .unwrap()
+                .contains("Review alice/project#42")
+        );
+        let state = f.state();
+        let record = &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"];
+        assert_eq!(record["pane"], target);
+        assert_eq!(record["multiplexer"], backend);
+        assert_eq!(record["tab_name"], "Review alice/project#42");
+        assert!(
+            fs::read_to_string(f.root.join("ack-1.txt"))
+                .unwrap()
+                .contains(&format!("Working through {backend} in test-{backend}"))
+        );
+    }
+}
+
+#[test]
+fn unavailable_alternative_sessions_are_retried_without_claiming_work() {
+    for backend in ["tmux", "zellij"] {
+        let f = Fixture::new();
+        f.config(json!({"multiplexer":backend,"agent":MOCK_TOOLS.get().unwrap().join("agent")}));
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(1, "alice", "summon")]]),
+        );
+        fs::write(f.root.join("server-down"), "").unwrap();
+        assert!(!f.run().status.success());
+        assert_eq!(f.launches(), 0);
+        assert!(!fs::read_dir(&f.root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("reaction-")
+        }));
+        fs::remove_file(f.root.join("server-down")).unwrap();
+        f.success();
+        assert_eq!(f.launches(), 1);
+        assert_eq!(f.acknowledgements(), 1);
+    }
+}
+
+#[test]
+fn changing_multiplexer_does_not_repeat_a_claimed_comment() {
+    let f = Fixture::new();
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "summon")]]),
+    );
+    f.success();
+    for backend in ["tmux", "zellij"] {
+        f.config(json!({"multiplexer":backend,"agent":MOCK_TOOLS.get().unwrap().join("agent")}));
+        f.success();
+        assert!(
+            f.command(&format!("machine-{backend}"))
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 1);
+}
+
+#[test]
+fn alternative_launcher_failures_keep_the_shared_claim() {
+    for backend in ["tmux", "zellij"] {
+        let f = Fixture::new();
+        f.config(json!({"multiplexer":backend,"agent":MOCK_TOOLS.get().unwrap().join("agent")}));
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(1, "alice", "summon")]]),
+        );
+        fs::write(f.root.join("multiplexer-fails"), "").unwrap();
+        f.success();
+        fs::remove_file(f.root.join("multiplexer-fails")).unwrap();
+        assert!(
+            f.command("another-machine")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert_eq!(f.launches(), 0);
+        assert_eq!(f.acknowledgements(), 0);
+        assert_eq!(
+            f.state()["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"]["status"],
+            "needs-attention"
+        );
+    }
+}
+
+#[test]
+fn invalid_backend_or_names_cannot_start_work() {
+    let f = Fixture::new();
+    for config in [
+        json!({"multiplexer":"unknown"}),
+        json!({"workspace_name":""}),
+        json!({"tab_name":"two\nlines"}),
+    ] {
+        f.config(config);
+        assert!(!f.run().status.success());
+    }
+    f.config(json!({"workspace_name":"x".repeat(257)}));
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "summon")]]),
+    );
+    assert!(!f.run().status.success());
+    assert_eq!(f.launches(), 0);
+    assert!(!fs::read_dir(&f.root).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("reaction-")
+    }));
+}
+
+#[test]
+fn global_mode_uses_local_checkouts_for_reuse_without_polling_idle_repositories() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.root.join("repos/project/.git")).unwrap();
+    f.config(
+        json!({"repositories":{}, "discover_github_repositories":true, "discover_repositories":true,
+        "repos_directory":f.root.join("repos")}),
+    );
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "summon")]]),
+    );
+    f.success();
+    assert_eq!(
+        f.launches(),
+        0,
+        "an idle local checkout should not be polled in global mode"
+    );
+    f.write(
+        "search.json",
+        &json!([{"total_count":1,"incomplete_results":false,"items":[
+        {"repository_url":"https://api.github.com/repos/alice/project"}]}]),
+    );
+    f.success();
+    assert_eq!(f.launches(), 1);
+    assert!(
+        !f.root.join("clones").exists(),
+        "the matching checkout should be reused"
+    );
+    f.write(
+        "search.json",
+        &json!([{"total_count":0,"incomplete_results":false,"items":[]}]),
+    );
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(2, "alice", "summon")]]),
+    );
+    f.success();
+    assert_eq!(
+        f.launches(),
+        1,
+        "a successfully drained repository should leave the pending queue"
+    );
+}
+
+#[test]
+fn explicit_repository_mappings_are_polled_even_without_global_search_results() {
+    let f = Fixture::new();
+    f.config(json!({"discover_github_repositories":true}));
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "summon")]]),
+    );
+    f.success();
+    assert_eq!(f.launches(), 1);
 }

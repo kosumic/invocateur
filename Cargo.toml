@@ -3,7 +3,7 @@ name = "invocateur"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Summon coding agents in Herdr from your GitHub comments"
+description = "Summon coding agents from your GitHub comments"
 
 [dependencies]
 anyhow = "1"

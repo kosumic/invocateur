@@ -1,14 +1,14 @@
 # invocateur
 
-A Rust daemon and Home Manager systemd user service. It polls GitHub through your
-local authenticated `gh` CLI and starts a coding agent in a background Herdr
-workspace when **you** post a configured spell.
+A Rust daemon that polls GitHub through your local authenticated `gh` CLI and
+starts a coding agent in **Herdr (default), tmux, or Zellij** when you post a
+configured spell. A Home Manager module provides a systemd user service.
 
 ## Install without Nix
 
 Install a current stable Rust toolchain (Cargo), a C compiler/linker, Git,
-[GitHub CLI](https://cli.github.com/), [Herdr](https://herdr.dev/), and the coding
-agent you want to use. The agent executable must be available to the Herdr server.
+[GitHub CLI](https://cli.github.com/), your chosen multiplexer, and the coding
+agent you want to use. Herdr is the default multiplexer.
 
 Install Invocateur and authenticate with GitHub:
 
@@ -22,6 +22,9 @@ Create `~/.config/invocateur/config.json`:
 
 ```json
 {
+  "multiplexer": "herdr",
+  "workspace_name": "{repository}#{issue_number} {agent_name}",
+  "tab_name": "{agent_name}",
   "spells": ["summon"],
   "agent": "codex",
   "repos_directory": "~/repos",
@@ -41,14 +44,16 @@ Validate the configuration without contacting GitHub or starting agents:
 ~/.cargo/bin/invocateur --config ~/.config/invocateur/config.json --check-config
 ```
 
-Start Herdr normally, leave its default session running, then run Invocateur:
+With the default backend, start Herdr normally and leave its default session
+running, then run Invocateur:
 
 ```bash
 ~/.cargo/bin/invocateur --config ~/.config/invocateur/config.json
 ```
 
 Keep this process running to poll for new spell comments. Set `herdr_session`
-if you use a different existing Herdr session. Invocateur does not start Herdr.
+if you use a different existing Herdr session. See the backend settings below for
+tmux and Zellij. Invocateur requires an existing multiplexer session.
 
 ### Run as a systemd user service on Linux
 
@@ -91,8 +96,62 @@ After editing `config.json`, restart the service:
 systemctl --user restart invocateur
 ```
 
-Keep Herdr running when using the service. On Unix systems without systemd, use the
+Keep the configured multiplexer session running. On Unix systems without systemd, use the
 foreground command above or configure your operating system's process manager.
+
+## Multiplexers and names
+
+Set `multiplexer` in JSON or `services.invocateur.multiplexer` in Home Manager:
+
+| Backend | Session setting / default | Agent location |
+| --- | --- | --- |
+| `herdr` | `herdr_session` / `default` | New background workspace and named tab |
+| `tmux` | `tmux_session` / `invocateur` | New detached window in the existing session |
+| `zellij` | `zellij_session` / `invocateur` | New background tab in the existing session |
+
+The Home Manager session options are `herdrSession`, `tmuxSession`, and
+`zellijSession`. It installs the selected multiplexer package. Standalone users
+can override binary paths with `herdr_path`, `tmux_path`, and `zellij_path`.
+
+Create the selected alternative's session before using it:
+
+```bash
+# tmux, when multiplexer = "tmux"
+tmux new-session -d -s invocateur
+
+# Zellij, when multiplexer = "zellij"
+zellij attach --create-background invocateur
+```
+
+Attach later with `tmux attach -t invocateur` or `zellij attach invocateur`.
+Herdr validates agent readiness and submits the task through its agent API.
+tmux and Zellij run the agent executable with `agent_args` followed by the task
+as one final positional argument, so use an agent CLI that supports an initial
+prompt argument. The executable is resolved from Invocateur's `PATH` (or an
+absolute `agent` path); task text is passed literally, without shell expansion.
+Approval and trust dialogs remain interactive. The Zellij backend uses the
+`new-tab --no-focus` initial-command API verified with Zellij 0.45.1.
+
+Configure names using `workspace_name` / `tab_name` in JSON, or `workspaceName` /
+`tabName` in Home Manager. Defaults are `{repository}#{issue_number} {agent_name}`
+and `{agent_name}`. Workspace names apply to Herdr; tab names apply to Herdr and
+Zellij tabs or tmux windows. Session names are configured separately.
+
+Name templates support `{repository}`, `{issue_number}`, `{agent}`,
+`{agent_name}`, `{comment_id}`, `{multiplexer}`, and `{session}`. For example:
+
+```json
+{
+  "multiplexer": "zellij",
+  "zellij_session": "invocateur",
+  "workspace_name": "{repository} issue {issue_number}",
+  "tab_name": "issue-{issue_number}-{comment_id}"
+}
+```
+
+Rendered names must be nonempty, single-line, and at most 256 UTF-8 bytes. The
+internal agent identity and GitHub claim key remain independent of display names.
+Changing backends or names does not cause an already claimed comment to run again.
 
 ## Install with Nix and Home Manager
 
@@ -117,6 +176,9 @@ imports = [ inputs.invocateur.homeManagerModules.default ];
 ```nix
 services.invocateur = {
   enable = true;
+  multiplexer = "herdr"; # or "tmux" / "zellij"
+  workspaceName = "{repository}#{issue_number} {agent_name}";
+  tabName = "{agent_name}";
   spells = [ "summon" ];
   agent = "codex";
   agentArgs = [];
@@ -134,9 +196,10 @@ services.invocateur = {
 ```
 
 All four settings have defaults: `summon`, `codex`, `~/repos`, and 60 seconds.
-`agent` is a Herdr-supported agent kind, such as `codex` or `claude`. Install the
-chosen agent in the Herdr server's environment; `extraPackages` also makes packages
-available to the polling service and defaults to `[ pkgs.codex ]`.
+`agent` is a Herdr-supported agent kind, such as `codex` or `claude`, or an
+executable name/absolute path for tmux and Zellij. `extraPackages` makes agent
+packages available to the polling service and defaults to `[ pkgs.codex ]`.
+Herdr also needs its agent executable in the server's environment.
 
 Log in with `gh auth login`, and start Herdr normally before using the service.
 The default Herdr session is `default`; set `herdrSession` to target another
@@ -155,7 +218,8 @@ Triggered by https://github.com/owner/repo/issues/42#issuecomment-123.
 
 Customize it with `acknowledgement_message` in JSON or
 `services.invocateur.acknowledgementMessage` in Home Manager. The nonempty message
-supports `{agent}`, `{comment_url}`, `{repository}`, and `{issue_number}`. You can
+supports `{agent}`, `{comment_url}`, `{repository}`, `{issue_number}`,
+`{multiplexer}`, and `{session}`. You can
 include a machine name directly in each machine's message. A hidden marker keeps
 acknowledgement comments from triggering agents, even if a custom message includes
 a spell on its own line. Inline review triggers are acknowledged in the PR's
@@ -208,15 +272,19 @@ description, comment link, and the rest of your comment as its task; each text
 section is limited to 24,000 UTF-8 bytes.
 
 The service searches for your recently updated conversations and reviews across
-GitHub and watches their repositories. Set `discoverGithubRepositories = false`
+GitHub and inspects their repositories. Set `discoverGithubRepositories = false`
 to restrict polling to local and explicitly configured repositories. Search
 indexing can add delay beyond the polling interval. Incomplete search responses
 or results above GitHub's 1,000-result limit are reported without advancing the
-discovery cursor, so results are not silently discarded. Already discovered
-repositories continue to be polled if discovery fails.
+discovery cursor, so results are not silently discarded. Pending failed polls and
+explicit repository mappings continue to be polled if discovery fails.
 
 The service also discovers GitHub `origin` remotes under `reposDirectory`, in both
-`~/repos/project` and `~/repos/owner/project` layouts. Discovery runs on every poll.
+`~/repos/project` and `~/repos/owner/project` layouts. In global mode these paths
+are a checkout catalog: only repositories with recent matching GitHub search
+results, pending retries, or explicit mappings get comment API queries. An idle
+poll does not scan the checkout catalog. With global discovery disabled, all
+locally discovered repositories are polled directly.
 Explicit `repositories` entries override discovered paths. A missing checkout is
 shallow cloned on the first matching comment unless `cloneMissing = false`.
 Repositories found through GitHub use `reposDirectory/owner/repo` if there is no
@@ -226,8 +294,9 @@ or creating worktrees; origin must match the watched repository.
 The [GitHub comment API](https://docs.github.com/en/rest/issues/comments)
 includes issue and PR conversation comments. Inline review comments use the
 separate review-comment endpoint; set `reviewComments = false` to disable those.
-Each poll makes one identity request, two paginated GitHub searches, and at least
-two paginated requests per watched repository. Discovery uses GitHub's
+Each global poll makes one identity request, two paginated GitHub searches, and
+two paginated comment queries per pending or explicitly watched repository
+(one when review comments are disabled). Discovery uses GitHub's
 [commenter and review search qualifiers](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests),
 including private repositories accessible through your `gh` login.
 `githubHost` defaults to `github.com` and supports authenticated enterprise hosts.
@@ -243,7 +312,7 @@ State lives in `$XDG_STATE_HOME/invocateur/state.json` (normally
 `~/.local/state/invocateur/state.json`), with a lock preventing concurrent
 instances. State is written before launching. Interrupted or ambiguous Herdr
 operations are recorded as `reserved`, `claimed`, or `needs-attention` and are never retried
-automatically. Inspect the saved pane/agent and logs; continue the existing agent
+automatically. Inspect the saved multiplexer, session, pane/tab, and logs; continue the existing agent
 manually, or post a new spell comment after resolving the problem. An unavailable
 Herdr server or failed GitHub read is retried on the next poll. Do not delete state
 to retry a launch: that loses deduplication history. State retains launch records
