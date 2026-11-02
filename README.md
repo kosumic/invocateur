@@ -25,7 +25,8 @@ Create `~/.config/invocateur/config.json`:
   "spells": ["summon"],
   "agent": "codex",
   "repos_directory": "~/repos",
-  "poll_interval_seconds": 60
+  "poll_interval_seconds": 60,
+  "acknowledgement_message": "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}."
 }
 ```
 
@@ -119,6 +120,7 @@ services.invocateur = {
   spells = [ "summon" ];
   agent = "codex";
   agentArgs = [];
+  acknowledgementMessage = "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}.";
   reposDirectory = "${config.home.homeDirectory}/repos";
   pollInterval = 60; # seconds between completed polls
   discoverGithubRepositories = true;
@@ -140,6 +142,51 @@ Log in with `gh auth login`, and start Herdr normally before using the service.
 The default Herdr session is `default`; set `herdrSession` to target another
 already running session. The daemon does not start or restart Herdr itself.
 
+## Acknowledgements and multiple machines
+
+After successfully starting an agent and submitting its task, Invocateur posts a
+new comment on the issue or PR. The default message is:
+
+```text
+🪄 Invocateur started codex for this task.
+
+Triggered by https://github.com/owner/repo/issues/42#issuecomment-123.
+```
+
+Customize it with `acknowledgement_message` in JSON or
+`services.invocateur.acknowledgementMessage` in Home Manager. The nonempty message
+supports `{agent}`, `{comment_url}`, `{repository}`, and `{issue_number}`. You can
+include a machine name directly in each machine's message. A hidden marker keeps
+acknowledgement comments from triggering agents, even if a custom message includes
+a spell on its own line. Inline review triggers are acknowledged in the PR's
+conversation, with a link back to the triggering review comment.
+
+Before starting an agent, Invocateur claims the triggering comment by adding a 👀
+reaction as the authenticated GitHub account. GitHub's
+[reaction API](https://docs.github.com/en/rest/reactions/reactions#create-reaction-for-an-issue-comment)
+returns `201` for a new reaction and `200` when that account already added it.
+Only the service receiving `201` starts an agent. This coordinates simultaneous
+services without relying on a shared filesystem or a race-prone comment lookup.
+
+Run the updated version on every machine, using the same `gh` account. The claim
+is per triggering comment; a new spell comment requests another agent. Reserve
+your own 👀 reaction on spell comments for Invocateur: an existing one counts as
+an existing claim, including one added manually. Other users' reactions do not
+prevent your account from claiming a task.
+
+Claims do not expire and remain after startup failures or lost responses. This
+prevents another machine from starting duplicate work while the first machine's
+status is uncertain. Check Herdr and service logs before requesting a new agent.
+Deleting an acknowledgement does not release its claim. All instances must be
+upgraded; older versions do not participate in this protocol.
+
+The `gh` account/token must be allowed to create reactions and issue/PR comments.
+Fine-grained tokens need the relevant Issues/Pull requests write permissions for
+the repositories being watched, including private repositories. A claim failure
+prevents agent startup. If acknowledgement posting fails after an agent starts,
+the agent stays running and the error is recorded locally. Ambiguous comment
+POSTs are not retried automatically, to avoid posting duplicate acknowledgements.
+
 ## Usage and behavior
 
 Post a comment on an issue, PR conversation, or inline PR review:
@@ -150,7 +197,11 @@ Fix the crash described here and check the relevant build.
 ```
 
 Spells are case-sensitive standalone lines. Multiple spells can be configured.
-Quoted lines and Markdown code blocks do not trigger agents. Only comments from
+Markdown blockquotes (including nested quotes and lazy continuation lines without
+another `>`), fenced/indented code blocks, inline code, and quoted strings such as
+`"summon"` do not trigger agents. Quote boundaries are parsed with CommonMark;
+a fresh unquoted spell after a Markdown quote still works. Comments containing
+raw HTML `<blockquote>` or `<q>` containers are ignored entirely. Only comments from
 the account returned by `gh api user` are accepted. Issue/PR descriptions and
 review summary bodies are not triggers. The agent receives the issue/PR title,
 description, comment link, and the rest of your comment as its task; each text
@@ -191,7 +242,7 @@ edited again. A new comment summons another agent.
 State lives in `$XDG_STATE_HOME/invocateur/state.json` (normally
 `~/.local/state/invocateur/state.json`), with a lock preventing concurrent
 instances. State is written before launching. Interrupted or ambiguous Herdr
-operations are recorded as `reserved` or `needs-attention` and are never retried
+operations are recorded as `reserved`, `claimed`, or `needs-attention` and are never retried
 automatically. Inspect the saved pane/agent and logs; continue the existing agent
 manually, or post a new spell comment after resolving the problem. An unavailable
 Herdr server or failed GitHub read is retried on the next poll. Do not delete state
@@ -217,6 +268,8 @@ nix run github:kosumic/invocateur -- --config /path/to/config.json --once
 `--once` performs one poll without sleeping. `--check-config` validates settings
 without using GitHub or Herdr. `--state-dir /absolute/path` overrides the state
 directory. Use a separate state directory for manual checks while the service runs.
+Launch records also retain the acknowledgement URL or acknowledgement error;
+`claimed-elsewhere` means the shared GitHub reaction was already present.
 
 ```json
 {
@@ -226,6 +279,20 @@ directory. Use a separate state directory for manual checks while the service ru
   "poll_interval_seconds": 60
 }
 ```
+
+## Design references
+
+- [Claude Code Action tracking comments](https://github.com/anthropics/claude-code-action/blob/d535f5172dec02b204866b393d6b20b9b2aaf98d/src/github/operations/comments/create-initial.ts)
+  provide a useful reference for acknowledgement and progress reporting. Its
+  [trigger matcher](https://github.com/anthropics/claude-code-action/blob/d535f5172dec02b204866b393d6b20b9b2aaf98d/src/github/validation/trigger.ts)
+  uses regular expressions; Invocateur independently parses Markdown to keep
+  quoted examples from triggering agents.
+- OpenHands Automation separates
+  [event deduplication](https://github.com/OpenHands/automation/blob/407bf8a021cce90656ee8d92292bd742b550080f/openhands/automation/ingest.py)
+  from [atomic worker claims and durable run state](https://github.com/OpenHands/automation/blob/407bf8a021cce90656ee8d92292bd742b550080f/openhands/automation/dispatcher.py).
+  Invocateur follows that separation with a GitHub reaction claim, durable local
+  launch records, and a separate acknowledgement comment. The comment text is
+  a status message, not the mutual-exclusion mechanism.
 
 ## Development
 

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Duration as TimeDelta, SecondsFormat, Utc};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
@@ -19,6 +20,7 @@ struct Config {
     spells: Vec<String>,
     agent: String,
     agent_args: Vec<String>,
+    acknowledgement_message: String,
     repos_directory: PathBuf,
     repositories: BTreeMap<String, PathBuf>,
     discover_repositories: bool,
@@ -41,6 +43,8 @@ impl Default for Config {
             spells: vec!["summon".into()],
             agent: "codex".into(),
             agent_args: vec![],
+            acknowledgement_message:
+                "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}.".into(),
             repos_directory: "~/repos".into(),
             repositories: BTreeMap::new(),
             discover_repositories: true,
@@ -64,6 +68,11 @@ impl Config {
         let mut cfg: Self = serde_json::from_slice(&fs::read(path)?)
             .with_context(|| format!("invalid config {}", path.display()))?;
         ensure!(!cfg.spells.is_empty(), "configure at least one spell");
+        ensure!(
+            !cfg.acknowledgement_message.trim().is_empty()
+                && cfg.acknowledgement_message.len() <= 60_000,
+            "acknowledgement_message must be nonempty and at most 60,000 UTF-8 bytes"
+        );
         for spell in &cfg.spells {
             ensure!(
                 !spell.trim().is_empty() && spell.trim() == spell && !spell.contains(['\r', '\n']),
@@ -202,6 +211,108 @@ fn args(values: &[&str]) -> Vec<String> {
 
 struct Client<'a>(&'a Config);
 impl Client<'_> {
+    fn gh_post(
+        &self,
+        endpoint: &str,
+        fields: &[(&str, &str)],
+        include_headers: bool,
+    ) -> Result<String> {
+        let mut argv = args(&[
+            "api",
+            "--hostname",
+            &self.0.github_host,
+            "--method",
+            "POST",
+            endpoint,
+        ]);
+        if include_headers {
+            argv.push("--include".into());
+        }
+        for (key, value) in fields {
+            argv.extend(args(&["--raw-field", &format!("{key}={value}")]));
+        }
+        // Never retry POSTs: a transport failure may follow a successful GitHub mutation.
+        run(&self.0.gh_path, &argv, self.0.command_timeout_seconds)
+    }
+
+    fn claim(&self, repo: &str, kind: &str, comment_id: u64, login: &str) -> Result<bool> {
+        let collection = if kind == "i" { "issues" } else { "pulls" };
+        let response = self.gh_post(
+            &format!("repos/{repo}/{collection}/comments/{comment_id}/reactions"),
+            &[("content", "eyes")],
+            true,
+        )?;
+        let (headers, body) = response
+            .split_once("\r\n\r\n")
+            .or_else(|| response.split_once("\n\n"))
+            .context("missing GitHub response headers")?;
+        let mut status_line = headers
+            .lines()
+            .next()
+            .context("missing GitHub HTTP status")?
+            .split_whitespace();
+        ensure!(
+            status_line
+                .next()
+                .is_some_and(|part| part.starts_with("HTTP/")),
+            "invalid GitHub HTTP status line"
+        );
+        let status: u16 = status_line
+            .next()
+            .context("missing GitHub HTTP status code")?
+            .parse()?;
+        let reaction: Value = serde_json::from_str(body)?;
+        ensure!(
+            reaction["content"] == "eyes"
+                && reaction["user"]["login"]
+                    .as_str()
+                    .is_some_and(|user| user.eq_ignore_ascii_case(login)),
+            "GitHub returned an unexpected claim reaction"
+        );
+        match status {
+            201 => Ok(true),
+            200 => Ok(false),
+            _ => bail!("unexpected GitHub claim status {status}; refusing to launch"),
+        }
+    }
+
+    fn acknowledge(&self, repo: &str, number: u64, id: &str, comment_url: &str) -> Result<String> {
+        let body = format!(
+            "<!-- invocateur:ack:{id} -->\n{}",
+            self.0.acknowledgement_message
+        );
+        // Replace in one pass so placeholder-looking text inside values remains literal.
+        let body = body
+            .split_inclusive('}')
+            .map(|part| {
+                for (placeholder, value) in [
+                    ("{agent}", self.0.agent.as_str()),
+                    ("{comment_url}", comment_url),
+                    ("{repository}", repo),
+                    ("{issue_number}", &number.to_string()),
+                ] {
+                    if let Some(prefix) = part.strip_suffix(placeholder) {
+                        return format!("{prefix}{value}");
+                    }
+                }
+                part.to_owned()
+            })
+            .collect::<String>();
+        ensure!(
+            body.len() <= 64_000,
+            "rendered acknowledgement exceeds 64,000 UTF-8 bytes"
+        );
+        let response: Value = serde_json::from_str(&self.gh_post(
+            &format!("repos/{repo}/issues/{number}/comments"),
+            &[("body", &body)],
+            false,
+        )?)?;
+        response["html_url"]
+            .as_str()
+            .map(str::to_owned)
+            .context("GitHub acknowledgement response has no URL")
+    }
+
     fn gh<T: DeserializeOwned>(&self, endpoint: &str, paginated: bool) -> Result<T> {
         let mut argv = args(&[
             "api",
@@ -343,6 +454,10 @@ struct Launch {
     status: String,
     pane: Option<String>,
     error: Option<String>,
+    #[serde(default)]
+    acknowledgement_url: Option<String>,
+    #[serde(default)]
+    acknowledgement_error: Option<String>,
 }
 
 fn save(path: &Path, state: &State) -> Result<()> {
@@ -473,37 +588,67 @@ fn discover_github(
     save(state_file, state)
 }
 
-// Match standalone spells outside quoted/indented/fenced Markdown examples.
+// Match source lines only where CommonMark recognizes ordinary, unquoted text.
 fn task(body: &str, spells: &[String]) -> Option<String> {
-    let mut fence: Option<(char, usize)> = None;
+    // A custom acknowledgement can itself contain a configured spell. Never summon from it.
+    if body.trim_start().starts_with("<!-- invocateur:ack:") {
+        return None;
+    }
+    let mut suppressed = 0;
+    let mut text_ranges = vec![];
+    for (event, range) in Parser::new(body).into_offset_iter() {
+        match event {
+            Event::Start(
+                Tag::BlockQuote(_)
+                | Tag::CodeBlock(_)
+                | Tag::HtmlBlock
+                | Tag::Image { .. }
+                | Tag::Link { .. },
+            ) => suppressed += 1,
+            Event::End(
+                TagEnd::BlockQuote(_)
+                | TagEnd::CodeBlock
+                | TagEnd::HtmlBlock
+                | TagEnd::Image
+                | TagEnd::Link,
+            ) => suppressed -= 1,
+            Event::Html(html) | Event::InlineHtml(html) => {
+                // Raw HTML quote containers can span blank lines and several Markdown blocks.
+                // Conservatively ignore the whole comment rather than misclassify their contents.
+                let html = html.to_ascii_lowercase();
+                for tag in ["<blockquote", "</blockquote", "<q", "</q"] {
+                    if html.match_indices(tag).any(|(offset, _)| {
+                        html[offset + tag.len()..]
+                            .starts_with(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+                    }) {
+                        return None;
+                    }
+                }
+            }
+            Event::Text(_) if suppressed == 0 => text_ranges.push(range),
+            _ => {}
+        }
+    }
     let mut found = false;
     let mut lines = vec![];
-    for line in body.lines() {
+    let mut offset = 0;
+    for raw_line in body.split_inclusive('\n') {
+        let line = raw_line.trim_end_matches('\n').trim_end_matches('\r');
         let trimmed = line.trim();
         let indented = line.starts_with("    ") || line.starts_with('\t');
-        let marker = trimmed.chars().next().filter(|c| *c == '`' || *c == '~');
-        let length = marker.map_or(0, |c| trimmed.chars().take_while(|v| *v == c).count());
-        let was_fenced = fence.is_some();
-        if !indented && length >= 3 {
-            match fence {
-                None => fence = Some((marker.unwrap(), length)),
-                Some((c, n))
-                    if marker == Some(c) && length >= n && trimmed[length..].trim().is_empty() =>
-                {
-                    fence = None
-                }
-                _ => {}
-            }
-        }
+        let start = offset + line.len() - line.trim_start().len();
+        let end = start + trimmed.len();
         if !indented
-            && !was_fenced
-            && fence.is_none()
             && spells.iter().any(|spell| spell == trimmed)
+            && text_ranges
+                .iter()
+                .any(|range| range.start <= start && end <= range.end)
         {
             found = true;
         } else {
             lines.push(line);
         }
+        offset += raw_line.len();
     }
     found.then(|| lines.join("\n").trim().to_owned())
 }
@@ -641,11 +786,16 @@ fn poll_repo(
                 status: "reserved".into(),
                 pane: None,
                 error: None,
+                acknowledgement_url: None,
+                acknowledgement_error: None,
             },
         );
         // Persist BEFORE mutation. A crash or ambiguous failure must never silently launch twice.
         save(state_file, state)?;
-        let result = launch(client, repo, directory, number, &name, &prompt, |pane| {
+        let result = (|| -> Result<bool> {
+            if !client.claim(repo, kind, comment.id, login)? {
+                return Ok(false);
+            }
             state
                 .repositories
                 .get_mut(&key)
@@ -653,9 +803,21 @@ fn poll_repo(
                 .launches
                 .get_mut(&id)
                 .unwrap()
-                .pane = Some(pane.into());
-            save(state_file, state)
-        });
+                .status = "claimed".into();
+            save(state_file, state)?;
+            launch(client, repo, directory, number, &name, &prompt, |pane| {
+                state
+                    .repositories
+                    .get_mut(&key)
+                    .unwrap()
+                    .launches
+                    .get_mut(&id)
+                    .unwrap()
+                    .pane = Some(pane.into());
+                save(state_file, state)
+            })?;
+            Ok(true)
+        })();
         let record = state
             .repositories
             .get_mut(&key)
@@ -664,9 +826,13 @@ fn poll_repo(
             .get_mut(&id)
             .unwrap();
         match result {
-            Ok(()) => {
+            Ok(true) => {
                 record.status = "started".into();
                 eprintln!("started {name} for {}", comment.html_url);
+            }
+            Ok(false) => {
+                record.status = "claimed-elsewhere".into();
+                eprintln!("skipping {}: already claimed on GitHub", comment.html_url);
             }
             Err(error) => {
                 record.status = "needs-attention".into();
@@ -679,6 +845,26 @@ fn poll_repo(
             }
         }
         save(state_file, state)?;
+        if state.repositories[&key].launches[&id].status == "started" {
+            let acknowledgement = client.acknowledge(repo, number, &id, &comment.html_url);
+            let record = state
+                .repositories
+                .get_mut(&key)
+                .unwrap()
+                .launches
+                .get_mut(&id)
+                .unwrap();
+            match acknowledgement {
+                Ok(url) => record.acknowledgement_url = Some(url),
+                Err(error) => {
+                    record.acknowledgement_error = Some(format!("{error:#}"));
+                    eprintln!(
+                        "{name} is running, but its acknowledgement failed: {error:#}; not retrying an ambiguous comment POST"
+                    );
+                }
+            }
+            save(state_file, state)?;
+        }
     }
     state.repositories.get_mut(&key).unwrap().cursor = poll_started;
     save(state_file, state)

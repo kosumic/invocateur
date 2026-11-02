@@ -9,6 +9,7 @@
   settings = {
     inherit (cfg) spells agent repositories;
     agent_args = cfg.agentArgs;
+    acknowledgement_message = cfg.acknowledgementMessage;
     repos_directory = cfg.reposDirectory;
     discover_repositories = cfg.discoverRepositories;
     discover_github_repositories = cfg.discoverGithubRepositories;
@@ -53,6 +54,11 @@ in {
       type = types.listOf types.str;
       default = [];
       description = "Native agent arguments passed after herdr agent start --.";
+    };
+    acknowledgementMessage = mkOption {
+      type = types.str;
+      default = "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}.";
+      description = "Comment posted after successfully starting an agent. Supports {agent}, {comment_url}, {repository}, and {issue_number}.";
     };
     reposDirectory = mkOption {
       type = types.str;
