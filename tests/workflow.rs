@@ -6,10 +6,14 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Command, Output},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+static MOCK_TOOLS: OnceLock<PathBuf> = OnceLock::new();
 struct Fixture {
     root: PathBuf,
 }
@@ -33,6 +37,13 @@ impl Fixture {
             "search.json",
             &json!([{"total_count":0,"incomplete_results":false,"items":[]}]),
         );
+        // Publish immutable executables before any test can spawn a child.
+        // Concurrent fixture writes and process creation can otherwise inherit a writable
+        // script descriptor briefly and make exec fail with ETXTBSY on Linux.
+        MOCK_TOOLS.get_or_init(|| {
+        let directory = PathBuf::from(option_env!("CARGO_TARGET_TMPDIR").unwrap_or("target/tmp"))
+            .join(format!("invocateur-tools-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
         let shell = env::split_paths(&env::var_os("PATH").unwrap())
             .map(|p| p.join("sh"))
             .find(|p| p.is_file())
@@ -130,10 +141,12 @@ esac
 "#,
             ),
         ] {
-            let path = f.root.join(name);
+            let path = directory.join(name);
             fs::write(&path, format!("#!{}\nset -eu\n{script}\n", shell.display())).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        directory
+        });
         f.config(json!({}));
         f
     }
@@ -147,9 +160,9 @@ esac
             "discover_github_repositories": false,
             "initial_lookback_seconds": 3600,
             "herdr_session": "test-session",
-            "gh_path": self.root.join("gh"),
-            "git_path": self.root.join("git"),
-            "herdr_path": self.root.join("herdr"),
+            "gh_path": MOCK_TOOLS.get().unwrap().join("gh"),
+            "git_path": MOCK_TOOLS.get().unwrap().join("git"),
+            "herdr_path": MOCK_TOOLS.get().unwrap().join("herdr"),
         });
         cfg.as_object_mut()
             .unwrap()
