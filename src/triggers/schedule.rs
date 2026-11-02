@@ -552,7 +552,7 @@ impl<'a> ScheduleTrigger<'a> {
             (|| -> Result<()> {
                 multiplexer::validate_names(&workspace_name, &tab_name)?;
                 let prompt = format!(
-                    "Scheduled task {}.\nScheduled occurrence: {scheduled}.\n\n{prompt}\n\nFollow the directory's AGENTS.md instructions. Manage persistent schedules with invocateur schedule --help.",
+                    "Scheduled task {}.\nScheduled occurrence: {scheduled}.\n\n{prompt}\n\nFollow the directory's AGENTS.md instructions. Manage persistent schedules with invo schedule --help.",
                     task.name
                 );
                 multiplexer::launch(

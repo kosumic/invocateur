@@ -291,7 +291,7 @@ fn render_template(template: &str, values: &[(&str, &str)]) -> String {
 
 fn schedule_instructions(directory: &Path) -> String {
     format!(
-        "When the user requests scheduling, manage persistent schedules through invocateur schedule --help (create, list, get, update, delete). This service's state directory is {}. Supply it using --state-dir before schedule when needed. Changes take effect without restarting the service.",
+        "When the user requests scheduling, manage persistent schedules through invo schedule --help (create, list, get, update, delete). This service's state directory is {}. Supply it using --state-dir before schedule when needed. Changes take effect without restarting the service.",
         directory.display()
     )
 }
@@ -318,7 +318,7 @@ fn main() -> Result<()> {
             "--check-config" => check = true,
             "--help" | "-h" => {
                 println!(
-                    "invocateur serve --config FILE [--state-dir DIRECTORY] [--once | --check-config]\ninvocateur schedule --help\n\nRun GitHub comment triggers and scheduled agent or command tasks. Config format: TOML."
+                    "invo serve --config FILE [--state-dir DIRECTORY] [--once | --check-config]\ninvo schedule --help\n\nRun GitHub comment triggers and scheduled agent or command tasks. Config format: TOML."
                 );
                 return Ok(());
             }

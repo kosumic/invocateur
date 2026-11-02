@@ -1,9 +1,14 @@
 [package]
 name = "invocateur"
+autobins = false
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Summon coding agents from your GitHub comments"
+
+[[bin]]
+name = "invo"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

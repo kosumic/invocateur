@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{env, fs, io::Read, path::PathBuf, time::Duration};
 
-const HELP: &str = "invocateur schedule <create|list|get|update|replace|delete|enable|disable|resume> [NAME] [OPTIONS]\n\nCreate/update options:\n  --cron EXPR | --every-seconds N\n  --timezone IANA_ZONE  --directory PATH\n  --prompt TEXT | -- COMMAND [ARG ...]\n  --run-immediately  --enable  --disable\n  --timeout-seconds N  --workspace-name TEMPLATE  --tab-name TEMPLATE\n  --file FILE.json    Read a JSON task or patch; use - for stdin\n\nConnection options (before a command delimiter):\n  --state-dir PATH    Locate api.json and api-token (defaults to XDG state)\n  --url http://127.0.0.1:PORT  --token-file PATH\n\nAll output is JSON. Updates use If-Match to avoid concurrent lost edits.\n";
+const HELP: &str = "invo schedule <create|list|get|update|replace|delete|enable|disable|resume> [NAME] [OPTIONS]\n\nCreate/update options:\n  --cron EXPR | --every-seconds N\n  --timezone IANA_ZONE  --directory PATH\n  --prompt TEXT | -- COMMAND [ARG ...]\n  --run-immediately  --enable  --disable\n  --timeout-seconds N  --workspace-name TEMPLATE  --tab-name TEMPLATE\n  --file FILE.json    Read a JSON task or patch; use - for stdin\n\nConnection options (before a command delimiter):\n  --state-dir PATH    Locate api.json and api-token (defaults to XDG state)\n  --url http://127.0.0.1:PORT  --token-file PATH\n\nAll output is JSON. Updates use If-Match to avoid concurrent lost edits.\n";
 
 pub fn state_dir(value: Option<PathBuf>) -> Result<PathBuf> {
     crate::expand_home(&value.unwrap_or_else(|| {
@@ -118,7 +118,7 @@ pub fn run(arguments: Vec<String>, inherited_state: Option<PathBuf>) -> Result<(
                 break;
             }
             _ if !arg.starts_with('-') && name.is_none() => name = Some(arg),
-            _ => bail!("unknown schedule argument {arg}; use invocateur schedule --help"),
+            _ => bail!("unknown schedule argument {arg}; use invo schedule --help"),
         }
     }
     ensure!(
@@ -140,10 +140,10 @@ pub fn run(arguments: Vec<String>, inherited_state: Option<PathBuf>) -> Result<(
     let url = match url {
         Some(url) => url,
         None => {
-            let endpoint: Value =
-                serde_json::from_slice(&fs::read(state.join("api.json")).context(
-                    "schedule API not running; start invocateur serve first or pass --url",
-                )?)?;
+            let endpoint: Value = serde_json::from_slice(
+                &fs::read(state.join("api.json"))
+                    .context("schedule API not running; start invo serve first or pass --url")?,
+            )?;
             endpoint["url"]
                 .as_str()
                 .context("invalid API endpoint metadata")?

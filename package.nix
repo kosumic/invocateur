@@ -13,7 +13,7 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "Summon coding agents in configurable terminal multiplexers from GitHub comments";
     license = lib.licenses.mit;
-    mainProgram = "invocateur";
+    mainProgram = "invo";
     platforms = lib.platforms.unix;
   };
 }

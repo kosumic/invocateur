@@ -1,7 +1,7 @@
 This is a Rust daemon with independent GitHub and scheduled-task triggers. GitHub
 uses the local `gh` CLI. Agent tasks start in Herdr (default), tmux, or Zellij;
 schedules can also run literal command argv. Schedules are managed dynamically
-through the local API and invocateur schedule CLI, never static service config. The Nix flake provides a package and
+through the local API and invo schedule CLI, never static service config. The Nix flake provides a package and
 a Home Manager systemd user service module.
 
 Use `nix develop` for the development environment. Run `cargo fmt --check`,

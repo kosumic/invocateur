@@ -71,7 +71,7 @@ in {
     apiEnabled = mkOption {
       type = types.bool;
       default = true;
-      description = "Enable the local HTTP API used by agents and invocateur schedule for dynamic schedule CRUD.";
+      description = "Enable the local HTTP API used by agents and invo schedule for dynamic schedule CRUD.";
     };
     apiListen = mkOption {
       type = types.str;

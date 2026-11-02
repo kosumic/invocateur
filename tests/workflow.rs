@@ -255,7 +255,7 @@ esac
         .unwrap();
     }
     fn command(&self, state: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_invocateur"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_invo"));
         command
             .arg("--config")
             .arg(self.root.join("config.toml"))
@@ -372,7 +372,7 @@ fn configurable_mention_agent_arguments_directory_and_interval() {
     assert!(start.contains("claude\n") && start.contains("--\n--model\nexample"));
     // The daemon must actually wait for its configured interval between polls.
     f.config(json!({"poll_interval_seconds":1, "initial_lookback_seconds":0}));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_invocateur"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_invo"))
         .arg("--config")
         .arg(f.root.join("config.toml"))
         .arg("--state-dir")
@@ -1211,7 +1211,7 @@ fn github_trigger_skips_missing_cli_or_login_then_recovers_without_restarting() 
         );
         let log = f.root.join("daemon.log");
         let mut daemon = Daemon(
-            Command::new(env!("CARGO_BIN_EXE_invocateur"))
+            Command::new(env!("CARGO_BIN_EXE_invo"))
                 .arg("--config")
                 .arg(f.root.join("config.toml"))
                 .arg("--state-dir")
@@ -1268,7 +1268,7 @@ impl Drop for ApiDaemon {
 fn start_api(f: &Fixture) -> ApiDaemon {
     let log = f.root.join("api-daemon.log");
     let mut daemon = ApiDaemon(
-        Command::new(env!("CARGO_BIN_EXE_invocateur"))
+        Command::new(env!("CARGO_BIN_EXE_invo"))
             .arg("serve")
             .arg("--config")
             .arg(f.root.join("config.toml"))
@@ -1371,7 +1371,7 @@ fn api_ok(f: &Fixture, method: &str, path: &str, body: Option<Value>) -> Value {
     output
 }
 fn cli(f: &Fixture, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_invocateur"))
+    Command::new(env!("CARGO_BIN_EXE_invo"))
         .arg("--state-dir")
         .arg(f.root.join("state"))
         .arg("schedule")
@@ -1553,7 +1553,7 @@ fn concurrent_agents_cannot_create_the_same_schedule_twice() {
     let task = f.root.join("task.json");
     f.write("task.json", &command_task(&f, "one"));
     let spawn = || {
-        Command::new(env!("CARGO_BIN_EXE_invocateur"))
+        Command::new(env!("CARGO_BIN_EXE_invo"))
             .arg("--state-dir")
             .arg(f.root.join("state"))
             .args(["schedule", "create", "--file"])

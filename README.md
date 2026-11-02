@@ -1,5 +1,7 @@
 # invocateur
 
+The CLI command is `invo`.
+
 A Rust daemon that polls GitHub through your local authenticated `gh` CLI and
 starts a coding agent in **Herdr (default), tmux, or Zellij** when you post a
 configured bot mention. It also runs scheduled coding-agent prompts and commands.
@@ -51,14 +53,14 @@ contents to TOML and update your service's `--config` path to `config.toml`.
 Validate the configuration without contacting GitHub or starting agents:
 
 ```bash
-~/.cargo/bin/invocateur --config ~/.config/invocateur/config.toml --check-config
+~/.cargo/bin/invo --config ~/.config/invocateur/config.toml --check-config
 ```
 
 With the default backend, start Herdr normally and leave its default session
 running, then run Invocateur:
 
 ```bash
-~/.cargo/bin/invocateur --config ~/.config/invocateur/config.toml
+~/.cargo/bin/invo --config ~/.config/invocateur/config.toml
 ```
 
 Keep this process running to poll for new bot mentions. Set `herdr_session`
@@ -80,7 +82,7 @@ Save this as `~/.config/systemd/user/invocateur.service`:
 Description=Summon coding agents from GitHub comments
 
 [Service]
-ExecStart=%h/.cargo/bin/invocateur --config %h/.config/invocateur/config.toml
+ExecStart=%h/.cargo/bin/invo --config %h/.config/invocateur/config.toml
 Environment="PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
 Restart=on-failure
 RestartSec=15
@@ -385,7 +387,7 @@ poll_interval_seconds = 60
 ## Scheduled tasks managed by agents
 
 Agents manage schedules dynamically through the local HTTP API or the
-`invocateur schedule` CLI. Definitions and run state are persisted outside Nix;
+`invo schedule` CLI. Definitions and run state are persisted outside Nix;
 create, update, enable, disable, and delete operations take effect in the running
 service without a restart. New installations start with no schedules.
 
@@ -396,7 +398,7 @@ agent, multiplexer, and polling intervals. Jobs are not declared in either file.
 With the service running, create an agent task:
 
 ```bash
-invocateur schedule create weekday-review \
+invo schedule create weekday-review \
   --cron '0 9 * * MON-FRI' --timezone America/New_York \
   --directory ~/repos/my-project \
   --prompt 'Review recent changes and follow AGENTS.md.'
@@ -405,7 +407,7 @@ invocateur schedule create weekday-review \
 Create a command task; everything after `--` is literal command argv:
 
 ```bash
-invocateur schedule create fetch-updates \
+invo schedule create fetch-updates \
   --every-seconds 3600 --directory ~/repos/my-project \
   -- git fetch --all
 ```
@@ -413,24 +415,24 @@ invocateur schedule create fetch-updates \
 Read and modify schedules:
 
 ```bash
-invocateur schedule list
-invocateur schedule get weekday-review
-invocateur schedule update weekday-review --cron '0 10 * * MON-FRI'
-invocateur schedule disable weekday-review
-invocateur schedule enable weekday-review
-invocateur schedule delete weekday-review
+invo schedule list
+invo schedule get weekday-review
+invo schedule update weekday-review --cron '0 10 * * MON-FRI'
+invo schedule disable weekday-review
+invo schedule enable weekday-review
+invo schedule delete weekday-review
 ```
 
 `create --file task.json` accepts a task object; `update NAME --file patch.json`
 accepts a partial task object. Use `--file -` to read JSON from stdin.
 `replace NAME --file task.json` replaces a definition. Output is always JSON,
 and CLI edits use the resource revision to prevent concurrent lost updates.
-See `invocateur schedule --help` and the [HTTP API reference](docs/api.md).
+See `invo schedule --help` and the [HTTP API reference](docs/api.md).
 
 The API defaults to `http://127.0.0.1:7639`. Its address and private token are
 discovered automatically from `$XDG_STATE_HOME/invocateur/api.json` and
 `api-token` (normally under `~/.local/state/invocateur`). Pass
-`invocateur --state-dir /path schedule ...` for another service state directory,
+`invo --state-dir /path schedule ...` for another service state directory,
 or use `--url` and `--token-file`. The environment variables
 `INVOCATEUR_API_URL` and `INVOCATEUR_API_TOKEN` are also supported.
 The CLI talks to the API, so the service must be running.
@@ -471,7 +473,7 @@ agent sessions continue in the background and may overlap future occurrences.
 
 Interrupted or ambiguous dispatches pause with `needs-attention`. Inspect the
 resource's `last_run` and the process or pane, then use
-`invocateur schedule resume NAME` after resolving the previous work. Resume
+`invo schedule resume NAME` after resolving the previous work. Resume
 schedules a future occurrence; it does not replay the interrupted one. Failed
 completed commands wait for their next occurrence. Deleting a schedule removes
 future work and its stored history; it does not cancel an agent already running.
