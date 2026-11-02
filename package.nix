@@ -11,7 +11,7 @@ rustPlatform.buildRustPackage {
   };
   cargoLock.lockFile = ./Cargo.lock;
   meta = {
-    description = "Summon coding agents in configurable terminal multiplexers from GitHub comments";
+    description = "Summon coding agents in Herdr from GitHub comments";
     license = lib.licenses.mit;
     mainProgram = "invo";
     platforms = lib.platforms.unix;

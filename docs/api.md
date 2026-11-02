@@ -71,7 +71,7 @@ Example POST body for a command:
 
 Name templates support `{task_name}`, `{scheduled_at}`, `{agent_name}`, `{agent}`,
 `{multiplexer}`, and `{session}`. Commands use no shell unless explicitly provided
-in argv. Agent tasks use the service's configured agent and multiplexer.
+in argv. Agent tasks use the service's configured agent and existing Herdr session.
 
 A resource contains `task`, `revision`, `created_at`, `updated_at`, `next_run`, and
 `last_run`. Disabled tasks have no `next_run`. `last_run` includes a dispatch ID,

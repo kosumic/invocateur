@@ -1,6 +1,6 @@
 //! GitHub-specific polling, prerequisites, durable claims, and coding-agent tasks.
 use super::Trigger;
-use crate::{Config, args, multiplexer, multiplexer::Multiplexer, run};
+use crate::{Config, args, multiplexer, run};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Duration as TimeDelta, SecondsFormat, Utc};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
@@ -231,10 +231,22 @@ impl Client<'_> {
         }
     }
 
-    fn acknowledge(&self, repo: &str, number: u64, id: &str, comment_url: &str) -> Result<String> {
+    fn acknowledge(
+        &self,
+        repo: &str,
+        number: u64,
+        id: &str,
+        comment_url: &str,
+        agent_name: &str,
+        forwarded: bool,
+    ) -> Result<String> {
         let body = format!(
             "<!-- invocateur:ack:{id} -->\n{}",
-            self.0.acknowledgement_message
+            if forwarded {
+                &self.0.followup_acknowledgement_message
+            } else {
+                &self.0.acknowledgement_message
+            }
         );
         // Replace in one pass so placeholder-looking text inside values remains literal.
         let body = body
@@ -242,6 +254,7 @@ impl Client<'_> {
             .map(|part| {
                 for (placeholder, value) in [
                     ("{agent}", self.0.agent.as_str()),
+                    ("{agent_name}", agent_name),
                     ("{comment_url}", comment_url),
                     ("{repository}", repo),
                     ("{issue_number}", &number.to_string()),
@@ -391,10 +404,14 @@ struct RepoState {
     not_before: DateTime<Utc>,
     cursor: DateTime<Utc>,
     launches: BTreeMap<String, Launch>,
+    #[serde(default)]
+    conversations: BTreeMap<u64, String>,
 }
 #[derive(Deserialize, Serialize)]
 struct Launch {
     url: String,
+    #[serde(default)]
+    issue_number: Option<u64>,
     agent: String,
     status: String,
     pane: Option<String>,
@@ -403,8 +420,8 @@ struct Launch {
     acknowledgement_url: Option<String>,
     #[serde(default)]
     acknowledgement_error: Option<String>,
-    #[serde(default)]
-    multiplexer: Multiplexer,
+    #[serde(default = "herdr_backend")]
+    multiplexer: String,
     #[serde(default)]
     session: Option<String>,
     #[serde(default)]
@@ -533,6 +550,7 @@ fn discover_github(
                 not_before,
                 cursor: std::cmp::max(not_before, cursor - TimeDelta::minutes(5)),
                 launches: BTreeMap::new(),
+                conversations: BTreeMap::new(),
             });
     }
     let account = state.accounts.get_mut(&key).unwrap();
@@ -652,6 +670,46 @@ fn issue_number(comment: &Comment) -> Result<u64> {
         .context("invalid issue number")
 }
 
+fn herdr_backend() -> String {
+    "herdr".into()
+}
+
+fn conversation_names(cfg: &Config, state: &RepoState, number: u64) -> BTreeSet<String> {
+    let same_session = |record: &&Launch| {
+        record.multiplexer == "herdr"
+            && record.session.as_deref().unwrap_or("default") == cfg.herdr_session
+    };
+    if let Some(record) = state
+        .conversations
+        .get(&number)
+        .and_then(|id| state.launches.get(id))
+        .filter(same_session)
+    {
+        return BTreeSet::from([record.agent.clone()]);
+    }
+    // Older state had no conversation index or issue number. Recover only from
+    // successful Herdr launches; never forget their per-comment claims.
+    state
+        .launches
+        .values()
+        .filter(|record| matches!(record.status.as_str(), "started" | "forwarded"))
+        .filter(same_session)
+        .filter(|record| {
+            record.issue_number.or_else(|| {
+                record
+                    .url
+                    .split('#')
+                    .next()?
+                    .rsplit('/')
+                    .next()?
+                    .parse()
+                    .ok()
+            }) == Some(number)
+        })
+        .map(|record| record.agent.clone())
+        .collect()
+}
+
 fn poll_repo(
     client: &Client<'_>,
     state: &mut State,
@@ -668,6 +726,7 @@ fn poll_repo(
             not_before: start,
             cursor: start,
             launches: BTreeMap::new(),
+            conversations: BTreeMap::new(),
         }
     });
     save(state_file, state)?;
@@ -703,25 +762,38 @@ fn poll_repo(
         let number = issue_number(&comment)?;
         // Readiness is checked before reserving: an unavailable server can safely be retried.
         multiplexer::ensure_ready(client.0)?;
-        client.checkout(repo, directory)?;
-        let name = format!("gh-{id}");
-        let (workspace_name, tab_name) =
-            multiplexer::names(client.0, repo, number, &name, comment.id)?;
+        let existing = multiplexer::find_agent(
+            client.0,
+            &conversation_names(client.0, &state.repositories[&key], number),
+        )?;
+        let forwarded = existing.is_some();
+        let name = existing
+            .as_ref()
+            .map(|agent| agent.name.clone())
+            .unwrap_or_else(|| format!("gh-{id}"));
+        let (workspace_name, tab_name) = if forwarded {
+            (None, None)
+        } else {
+            client.checkout(repo, directory)?;
+            let (workspace, tab) = multiplexer::names(client.0, repo, number, &name, comment.id)?;
+            (Some(workspace), Some(tab))
+        };
         let prompt = format!("Work on it: {}", comment.html_url);
         state.repositories.get_mut(&key).unwrap().launches.insert(
             id.clone(),
             Launch {
                 url: comment.html_url.clone(),
+                issue_number: Some(number),
                 agent: name.clone(),
                 status: "reserved".into(),
-                pane: None,
+                pane: existing.as_ref().map(|agent| agent.target.to_string()),
                 error: None,
                 acknowledgement_url: None,
                 acknowledgement_error: None,
-                multiplexer: client.0.multiplexer,
+                multiplexer: client.0.multiplexer.as_str().into(),
                 session: Some(multiplexer::session(client.0).to_owned()),
-                workspace_name: Some(workspace_name.clone()),
-                tab_name: Some(tab_name.clone()),
+                workspace_name: workspace_name.clone(),
+                tab_name: tab_name.clone(),
             },
         );
         // Persist BEFORE mutation. A crash or ambiguous failure must never silently launch twice.
@@ -738,13 +810,25 @@ fn poll_repo(
                 .get_mut(&id)
                 .unwrap()
                 .status = "claimed".into();
+            state
+                .repositories
+                .get_mut(&key)
+                .unwrap()
+                .conversations
+                .insert(number, id.clone());
             save(state_file, state)?;
+            if let Some(agent) = &existing {
+                multiplexer::input(client.0, &name, &prompt)?;
+                return Ok(Some(multiplexer::LaunchResponse {
+                    target: agent.target.clone(),
+                }));
+            }
             let request = multiplexer::LaunchRequest {
                 directory,
                 agent_name: &name,
                 prompt: &prompt,
-                workspace_name: &workspace_name,
-                tab_name: &tab_name,
+                workspace_name: workspace_name.as_deref().unwrap(),
+                tab_name: tab_name.as_deref().unwrap(),
             };
             let response = multiplexer::launch(client.0, &request, |pane| {
                 state
@@ -769,8 +853,8 @@ fn poll_repo(
         match result {
             Ok(Some(response)) => {
                 record.pane = Some(response.target.to_string());
-                record.status = "started".into();
-                eprintln!("started {name} for {}", comment.html_url);
+                record.status = if forwarded { "forwarded" } else { "started" }.into();
+                eprintln!("{} {name} for {}", record.status, comment.html_url);
             }
             Ok(None) => {
                 record.status = "claimed-elsewhere".into();
@@ -787,8 +871,12 @@ fn poll_repo(
             }
         }
         save(state_file, state)?;
-        if state.repositories[&key].launches[&id].status == "started" {
-            let acknowledgement = client.acknowledge(repo, number, &id, &comment.html_url);
+        if matches!(
+            state.repositories[&key].launches[&id].status.as_str(),
+            "started" | "forwarded"
+        ) {
+            let acknowledgement =
+                client.acknowledge(repo, number, &id, &comment.html_url, &name, forwarded);
             let record = state
                 .repositories
                 .get_mut(&key)

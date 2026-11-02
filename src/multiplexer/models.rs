@@ -45,37 +45,14 @@ string_id!(HerdrTabId, "Herdr tab ID", |value: &str| herdr_id(
 string_id!(HerdrWorkspaceId, "Herdr workspace ID", |value: &str| value
     .strip_prefix('w')
     .is_some_and(digits));
-string_id!(TmuxPaneId, "tmux pane ID", |value: &str| value
-    .strip_prefix('%')
-    .is_some_and(digits));
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ZellijTabId(u32);
-impl TryFrom<&str> for ZellijTabId {
-    type Error = anyhow::Error;
-    fn try_from(value: &str) -> Result<Self> {
-        ensure!(digits(value), "invalid Zellij tab ID");
-        Ok(Self(value.parse()?))
-    }
-}
-impl fmt::Display for ZellijTabId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchTarget {
     HerdrPane(HerdrPaneId),
-    TmuxPane(TmuxPaneId),
-    ZellijTab(ZellijTabId),
 }
 impl fmt::Display for LaunchTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::HerdrPane(id) => id.fmt(formatter),
-            Self::TmuxPane(id) => id.fmt(formatter),
-            Self::ZellijTab(id) => write!(formatter, "tab:{id}"),
         }
     }
 }

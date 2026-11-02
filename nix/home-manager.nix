@@ -6,12 +6,6 @@
 }: let
   cfg = config.services.invocateur;
   inherit (lib) mkEnableOption mkIf mkOption types;
-  multiplexerPackage =
-    if cfg.multiplexer == "herdr"
-    then cfg.herdrPackage
-    else if cfg.multiplexer == "tmux"
-    then cfg.tmuxPackage
-    else cfg.zellijPackage;
   settings = {
     inherit (cfg) agent repositories multiplexer;
     github_enabled = cfg.githubEnabled;
@@ -25,6 +19,7 @@
     agent_args = cfg.agentArgs;
     prefix_github_comments = cfg.prefixGithubComments;
     acknowledgement_message = cfg.acknowledgementMessage;
+    followup_acknowledgement_message = cfg.followupAcknowledgementMessage;
     repos_directory = cfg.reposDirectory;
     discover_repositories = cfg.discoverRepositories;
     discover_github_repositories = cfg.discoverGithubRepositories;
@@ -33,25 +28,12 @@
     initial_lookback_seconds = cfg.initialLookback;
     review_comments = cfg.reviewComments;
     herdr_session = cfg.herdrSession;
-    tmux_session = cfg.tmuxSession;
-    zellij_session = cfg.zellijSession;
     github_host = cfg.githubHost;
     gh_path =
       if cfg.githubEnabled
       then lib.getExe pkgs.gh
       else "gh";
-    herdr_path =
-      if cfg.multiplexer == "herdr"
-      then lib.getExe multiplexerPackage
-      else "herdr";
-    tmux_path =
-      if cfg.multiplexer == "tmux"
-      then lib.getExe multiplexerPackage
-      else "tmux";
-    zellij_path =
-      if cfg.multiplexer == "zellij"
-      then lib.getExe multiplexerPackage
-      else "zellij";
+    herdr_path = lib.getExe cfg.herdrPackage;
     git_path = lib.getExe pkgs.git;
     command_timeout_seconds = cfg.commandTimeout;
   };
@@ -80,7 +62,7 @@ in {
       description = "Loopback IP address and port for the schedule API. Credentials are generated privately in the service state directory.";
     };
     multiplexer = mkOption {
-      type = types.enum ["herdr" "tmux" "zellij"];
+      type = types.enum ["herdr"];
       default = "herdr";
       description = "Terminal multiplexer backend. The configured session must already be running.";
     };
@@ -92,7 +74,7 @@ in {
     tabName = mkOption {
       type = types.str;
       default = "{agent_name}";
-      description = "Herdr/Zellij tab or tmux window name template, with the same placeholders as workspaceName.";
+      description = "Herdr tab name template, with the same placeholders as workspaceName.";
     };
     package = mkOption {
       type = types.package;
@@ -103,16 +85,6 @@ in {
       type = types.package;
       default = pkgs.herdr;
       description = "Herdr package, compatible with the running Herdr server.";
-    };
-    tmuxPackage = mkOption {
-      type = types.package;
-      default = pkgs.tmux;
-      description = "tmux package used when multiplexer is tmux.";
-    };
-    zellijPackage = mkOption {
-      type = types.package;
-      default = pkgs.zellij;
-      description = "Zellij package used when multiplexer is zellij. Requires support for new-tab --no-focus and an initial command.";
     };
     botName = mkOption {
       type = types.str;
@@ -125,12 +97,12 @@ in {
       type = types.str;
       default = "codex";
       example = "claude";
-      description = "Herdr agent kind, or the agent executable name/absolute path for tmux and Zellij.";
+      description = "Herdr-supported agent kind, such as codex or claude.";
     };
     agentArgs = mkOption {
       type = types.listOf types.str;
       default = [];
-      description = "Native agent arguments. tmux and Zellij append the task as the final positional argument.";
+      description = "Native arguments passed to herdr agent start after --.";
     };
     prefixGithubComments = mkOption {
       type = types.bool;
@@ -140,7 +112,12 @@ in {
     acknowledgementMessage = mkOption {
       type = types.str;
       default = "🪄 [Invocateur](https://github.com/kosumic/invocateur) started {agent} for this task.\n\nTriggered by {comment_url}.";
-      description = "Comment posted after successfully starting an agent. Supports {agent}, {comment_url}, {repository}, {issue_number}, {multiplexer}, and {session}.";
+      description = "Comment posted after successfully starting an agent. Supports {agent}, {agent_name}, {comment_url}, {repository}, {issue_number}, {multiplexer}, and {session}.";
+    };
+    followupAcknowledgementMessage = mkOption {
+      type = types.str;
+      default = "↪️ [Invocateur](https://github.com/kosumic/invocateur) forwarded this comment to {agent_name}.\n\nTriggered by {comment_url}.";
+      description = "Comment posted after forwarding a follow-up to an existing agent. Supports the same placeholders as acknowledgementMessage.";
     };
     reposDirectory = mkOption {
       type = types.str;
@@ -188,16 +165,6 @@ in {
       default = "default";
       description = "Existing Herdr session to target explicitly. Start it before using the service.";
     };
-    tmuxSession = mkOption {
-      type = types.str;
-      default = "invocateur";
-      description = "Existing tmux session for new detached agent windows. Use letters, digits, underscores, or hyphens.";
-    };
-    zellijSession = mkOption {
-      type = types.str;
-      default = "invocateur";
-      description = "Existing Zellij session for new background agent tabs. Use letters, digits, underscores, or hyphens.";
-    };
     githubHost = mkOption {
       type = types.str;
       default = "github.com";
@@ -227,7 +194,7 @@ in {
       }
     ];
 
-    home.packages = [cfg.package multiplexerPackage];
+    home.packages = [cfg.package cfg.herdrPackage];
     xdg.configFile."invocateur/config.toml".source = configFile;
 
     systemd.user.services.invocateur = {
@@ -241,7 +208,7 @@ in {
         WorkingDirectory = config.home.homeDirectory;
         Environment = [
           "XDG_CONFIG_HOME=${config.xdg.configHome}"
-          "PATH=${lib.makeBinPath ([pkgs.git] ++ lib.optional cfg.githubEnabled pkgs.gh ++ [multiplexerPackage] ++ cfg.extraPackages)}:${config.home.profileDirectory}/bin:${config.home.homeDirectory}/.local/bin:${config.home.homeDirectory}/.nix-profile/bin:/run/current-system/sw/bin"
+          "PATH=${lib.makeBinPath ([pkgs.git] ++ lib.optional cfg.githubEnabled pkgs.gh ++ [cfg.herdrPackage] ++ cfg.extraPackages)}:${config.home.profileDirectory}/bin:${config.home.homeDirectory}/.local/bin:${config.home.homeDirectory}/.nix-profile/bin:/run/current-system/sw/bin"
         ];
       };
       Install.WantedBy = ["default.target"];

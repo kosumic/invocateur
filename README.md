@@ -3,15 +3,14 @@
 The CLI command is `invo`.
 
 A Rust daemon that polls GitHub through your local authenticated `gh` CLI and
-starts a coding agent in **Herdr (default), tmux, or Zellij** when you post a
+starts a coding agent in **Herdr** when you post a
 configured bot mention. It also runs scheduled coding-agent prompts and commands.
 A Home Manager module provides a systemd user service.
 
 ## Install without Nix
 
 Install a current stable Rust toolchain (Cargo), a C compiler/linker, Git,
-[GitHub CLI](https://cli.github.com/), your chosen multiplexer, and the coding
-agent you want to use. Herdr is the default multiplexer.
+[GitHub CLI](https://cli.github.com/), Herdr, and the coding agent you want to use.
 
 Install Invocateur and authenticate with GitHub:
 
@@ -65,8 +64,8 @@ running, then run Invocateur:
 ```
 
 Keep this process running to poll for new bot mentions. Set `herdr_session`
-if you use a different existing Herdr session. See the backend settings below for
-tmux and Zellij. Invocateur requires an existing multiplexer session.
+if you use a different existing Herdr session. Invocateur requires an existing
+Herdr session.
 
 ### Run as a systemd user service on Linux
 
@@ -112,57 +111,37 @@ systemctl --user restart invocateur
 Keep the configured multiplexer session running. On Unix systems without systemd, use the
 foreground command above or configure your operating system's process manager.
 
-## Multiplexers and names
+## Herdr and names
 
-Set `multiplexer` in TOML or `services.invocateur.multiplexer` in Home Manager:
+Herdr is the only supported multiplexer. Start Herdr normally and leave the
+configured session running. The default session is `default`; use `herdr_session`
+in TOML or `services.invocateur.herdrSession` in Home Manager to select another.
+Standalone users can set `herdr_path` to override the CLI binary path. The Home
+Manager module installs `herdrPackage`. `multiplexer = "herdr"` remains optional;
+no other backend value is accepted. Remove old alternative-backend settings when
+upgrading.
 
-| Backend | Session setting / default | Agent location |
-| --- | --- | --- |
-| `herdr` | `herdr_session` / `default` | New background workspace and named tab |
-| `tmux` | `tmux_session` / `invocateur` | New detached window in the existing session |
-| `zellij` | `zellij_session` / `invocateur` | New background tab in the existing session |
-
-The Home Manager session options are `herdrSession`, `tmuxSession`, and
-`zellijSession`. It installs the selected multiplexer package. Standalone users
-can override binary paths with `herdr_path`, `tmux_path`, and `zellij_path`.
-
-Create the selected alternative's session before using it:
-
-```bash
-# tmux, when multiplexer = "tmux"
-tmux new-session -d -s invocateur
-
-# Zellij, when multiplexer = "zellij"
-zellij attach --create-background invocateur
-```
-
-Attach later with `tmux attach -t invocateur` or `zellij attach invocateur`.
-Herdr validates agent readiness and submits the task through its agent API.
-tmux and Zellij run the agent executable with `agent_args` followed by the task
-as one final positional argument, so use an agent CLI that supports an initial
-prompt argument. The executable is resolved from Invocateur's `PATH` (or an
-absolute `agent` path); task text is passed literally, without shell expansion.
-Approval and trust dialogs remain interactive. The Zellij backend uses the
-`new-tab --no-focus` initial-command API verified with Zellij 0.45.1.
+Herdr validates agent readiness and submits text with `herdr agent prompt`.
+`agent` selects a Herdr-supported kind and `agent_args` supplies native agent
+arguments. Approval and trust dialogs remain interactive.
 
 Configure names using `workspace_name` / `tab_name` in TOML, or `workspaceName` /
 `tabName` in Home Manager. Defaults are `{repository}#{issue_number} {agent_name}`
-and `{agent_name}`. Workspace names apply to Herdr; tab names apply to Herdr and
-Zellij tabs or tmux windows. Session names are configured separately.
+and `{agent_name}`. They name new Herdr workspaces and tabs.
 
 Name templates support `{repository}`, `{issue_number}`, `{agent}`,
-`{agent_name}`, `{comment_id}`, `{multiplexer}`, and `{session}`. For example:
+`{agent_name}`, `{comment_id}`, `{multiplexer}` (always `herdr`), and `{session}`.
+For example:
 
 ```toml
-multiplexer = "zellij"
-zellij_session = "invocateur"
+herdr_session = "default"
 workspace_name = "{repository} issue {issue_number}"
 tab_name = "issue-{issue_number}-{comment_id}"
 ```
 
 Rendered names must be nonempty, single-line, and at most 256 UTF-8 bytes. The
 internal agent identity and GitHub claim key remain independent of display names.
-Changing backends or names does not cause an already claimed comment to run again.
+Changing names does not cause an already claimed comment to run again.
 
 ## Install with Nix and Home Manager
 
@@ -187,7 +166,7 @@ imports = [ inputs.invocateur.homeManagerModules.default ];
 ```nix
 services.invocateur = {
   enable = true;
-  multiplexer = "herdr"; # or "tmux" / "zellij"
+  multiplexer = "herdr";
   workspaceName = "{repository}#{issue_number} {agent_name}";
   tabName = "{agent_name}";
   botName = "invo";
@@ -210,8 +189,7 @@ services.invocateur = {
 
 The bot name, agent, repository directory, and polling interval default to
 `invo`, `codex`, `~/repos`, and 60 seconds.
-`agent` is a Herdr-supported agent kind, such as `codex` or `claude`, or an
-executable name/absolute path for tmux and Zellij. `extraPackages` makes agent
+`agent` is a Herdr-supported agent kind, such as `codex` or `claude`. `extraPackages` makes agent
 packages available to the polling service and defaults to `[ pkgs.codex ]`.
 Herdr also needs its agent executable in the server's environment.
 
@@ -232,7 +210,7 @@ Triggered by https://github.com/owner/repo/issues/42#issuecomment-123.
 
 Customize it with `acknowledgement_message` in TOML or
 `services.invocateur.acknowledgementMessage` in Home Manager. The nonempty message
-supports `{agent}`, `{comment_url}`, `{repository}`, `{issue_number}`,
+supports `{agent}`, `{agent_name}`, `{comment_url}`, `{repository}`, `{issue_number}`,
 `{multiplexer}`, and `{session}`. You can
 include a machine name directly in each machine's message. A hidden marker keeps
 acknowledgement comments from triggering agents, even if a custom message includes
@@ -247,7 +225,7 @@ Only the service receiving `201` starts an agent. This coordinates simultaneous
 services without relying on a shared filesystem or a race-prone comment lookup.
 
 Run the updated version on every machine, using the same `gh` account. The claim
-is per triggering comment; a new mention comment requests another agent. Reserve
+is per triggering comment, including follow-ups. Reserve
 your own 👀 reaction on mention comments for Invocateur: an existing one counts as
 an existing claim, including one added manually. Other users' reactions do not
 prevent your account from claiming a task.
@@ -310,7 +288,7 @@ review summary bodies are not triggers. The agent receives `Work on it:`
 followed by the triggering comment's link, plus an instruction to start any new
 GitHub comment with its agent instance name and a colon (for example,
 `gh-i-123: Working on it.`). This identity instruction also applies to scheduled
-agents and all multiplexer backends, using each launch's own agent name. It is
+agents, using each launch's own agent name. It is
 independent of the bot mention, agent program, and configurable workspace/tab names.
 The agent reads the issue or PR and your instructions from GitHub; Invo does not
 fetch or paste the title, description, or comment text into the launch prompt.
@@ -364,12 +342,47 @@ On first seeing a repository the daemon processes future comment updates only.
 Set `initialLookback = 3600` to include the previous hour for newly watched
 repositories. Subsequent restarts resume the saved cursor, including downtime.
 Polling uses a five-minute overlap for delayed API visibility. Editing a comment
-to add a bot mention can trigger it, but each comment launches at most once, even if
-edited again. A new comment summons another agent.
+to add a bot mention can trigger it, but each comment is dispatched at most once,
+even if edited again.
+
+### Follow-up comments
+
+The first mention on an issue or PR starts an agent. Later mention comments on
+that same conversation are forwarded to the existing named agent using
+`herdr agent prompt`, without creating another workspace or agent. For example,
+with hostname naming enabled on `thinker`, post `@thinker` again in a new comment.
+Issue/PR conversation comments and inline PR review comments share the same agent.
+Each input contains `Work on it:` and the new comment's link, plus the optional
+comment-prefix instruction; issue bodies and comment text are not pasted.
+
+The conversation association survives service restarts. Invo checks Herdr's live
+agent list before each follow-up and follows the agent's name if its pane moves.
+Idle, working, and done agents can receive input. A blocked or unknown state, an
+ambiguous match, or an unreadable response defers dispatch until a later poll.
+If the named agent has exited, the new mention starts a replacement. Conversation
+routing is local to the service state and configured Herdr session; use hostname
+mentions to address the machine that owns the agent.
+
+After forwarding, the default acknowledgement is:
+
+```text
+↪️ [Invocateur](https://github.com/kosumic/invocateur) forwarded this comment to gh-i-123.
+
+Triggered by https://github.com/owner/repo/issues/42#issuecomment-456.
+```
+
+Customize it with `followup_acknowledgement_message` in TOML or
+`services.invocateur.followupAcknowledgementMessage` in Home Manager. It accepts
+the same placeholders as `acknowledgement_message`. Follow-ups use the same
+author verification, unquoted-mention checks, and per-comment 👀 claim. A failed or
+ambiguous input is saved as `needs-attention` and is never automatically resent.
+Old launch records are preserved on upgrade, and previous successful Herdr agents
+can be associated from their saved comment links. If multiple old agents are still
+live for one conversation, resolve that ambiguity in Herdr before retrying.
 
 State lives in `$XDG_STATE_HOME/invocateur/state.json` (normally
 `~/.local/state/invocateur/state.json`), with a lock preventing concurrent
-instances. State is written before launching. Interrupted or ambiguous Herdr
+instances. State is written before launching or forwarding. Interrupted or ambiguous Herdr
 operations are recorded as `reserved`, `claimed`, or `needs-attention` and are never retried
 automatically. Inspect the saved multiplexer, session, pane/tab, and logs; continue the existing agent
 manually, or post a new mention comment after resolving the problem. An unavailable
@@ -397,7 +410,7 @@ nix run github:kosumic/invocateur -- --config /path/to/config.toml --once
 without using GitHub or Herdr. `--state-dir /absolute/path` overrides the state
 directory. Use a separate state directory for manual checks while the service runs.
 Launch records also retain the acknowledgement URL or acknowledgement error;
-`claimed-elsewhere` means the shared GitHub reaction was already present.
+`forwarded` means input was sent to the existing agent; `claimed-elsewhere` means the shared GitHub reaction was already present.
 
 ```toml
 bot_name = "invo"

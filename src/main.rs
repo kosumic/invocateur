@@ -35,6 +35,7 @@ struct Config {
     agent_args: Vec<String>,
     prefix_github_comments: bool,
     acknowledgement_message: String,
+    followup_acknowledgement_message: String,
     repos_directory: PathBuf,
     repositories: BTreeMap<String, PathBuf>,
     discover_repositories: bool,
@@ -44,13 +45,9 @@ struct Config {
     initial_lookback_seconds: u32,
     review_comments: bool,
     herdr_session: String,
-    tmux_session: String,
-    zellij_session: String,
     github_host: String,
     gh_path: String,
     herdr_path: String,
-    tmux_path: String,
-    zellij_path: String,
     git_path: String,
     command_timeout_seconds: u64,
 }
@@ -72,6 +69,8 @@ impl Default for Config {
             prefix_github_comments: true,
             acknowledgement_message:
                 "🪄 [Invocateur](https://github.com/kosumic/invocateur) started {agent} for this task.\n\nTriggered by {comment_url}.".into(),
+            followup_acknowledgement_message:
+                "↪️ [Invocateur](https://github.com/kosumic/invocateur) forwarded this comment to {agent_name}.\n\nTriggered by {comment_url}.".into(),
             repos_directory: "~/repos".into(),
             repositories: BTreeMap::new(),
             discover_repositories: true,
@@ -81,13 +80,9 @@ impl Default for Config {
             initial_lookback_seconds: 0,
             review_comments: true,
             herdr_session: "default".into(),
-            tmux_session: "invocateur".into(),
-            zellij_session: "invocateur".into(),
             github_host: "github.com".into(),
             gh_path: "gh".into(),
             herdr_path: "herdr".into(),
-            tmux_path: "tmux".into(),
-            zellij_path: "zellij".into(),
             git_path: "git".into(),
             command_timeout_seconds: 90,
         }
@@ -124,11 +119,18 @@ impl Config {
                 "workspace_name and tab_name must be nonempty single-line templates"
             );
         }
-        ensure!(
-            !cfg.acknowledgement_message.trim().is_empty()
-                && cfg.acknowledgement_message.len() <= 60_000,
-            "acknowledgement_message must be nonempty and at most 60,000 UTF-8 bytes"
-        );
+        for (name, message) in [
+            ("acknowledgement_message", &cfg.acknowledgement_message),
+            (
+                "followup_acknowledgement_message",
+                &cfg.followup_acknowledgement_message,
+            ),
+        ] {
+            ensure!(
+                !message.trim().is_empty() && message.len() <= 60_000,
+                "{name} must be nonempty and at most 60,000 UTF-8 bytes"
+            );
+        }
         ensure!(
             cfg.poll_interval_seconds > 0,
             "poll interval must be positive"
@@ -141,15 +143,6 @@ impl Config {
             !cfg.agent.is_empty() && !cfg.herdr_session.is_empty(),
             "agent and Herdr session cannot be empty"
         );
-        for session in [&cfg.tmux_session, &cfg.zellij_session] {
-            ensure!(
-                !session.is_empty()
-                    && session
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)),
-                "tmux_session and zellij_session must use letters, digits, underscores, or hyphens"
-            );
-        }
         ensure!(
             !cfg.github_host.is_empty()
                 && cfg

@@ -103,7 +103,7 @@ for arg do
       else status='200 OK'; fi
       printf 'HTTP/2.0 %s\r\nContent-Type: application/json\r\n\r\n{"id":7,"content":"eyes","user":{"login":"alice"}}' "$status"
       exit 0 ;;
-    repos/alice/project/issues/42/comments)
+    repos/alice/project/issues/*/comments)
       test "$method" = POST && test -s "$FIXTURE/prompts" || exit 2
       if test -f "$FIXTURE/ack-fails"; then echo 'comment forbidden' >&2; exit 1; fi
       count=0
@@ -112,7 +112,9 @@ for arg do
       printf '%s\n' "$count" > "$FIXTURE/ack-count"
       printf '%s' "$body" > "$FIXTURE/ack-$count.txt"
       if test -f "$FIXTURE/ack-lost-response"; then echo 'connection lost after comment' >&2; exit 1; fi
-      printf '{"html_url":"https://github.com/alice/project/issues/42#issuecomment-ack-%s"}' "$count"
+      number="${arg#repos/alice/project/issues/}"
+      number="${number%/comments}"
+      printf '{"html_url":"https://github.com/alice/project/issues/%s#issuecomment-ack-%s"}' "$number" "$count"
       exit 0 ;;
   esac
 done
@@ -141,13 +143,31 @@ case "$1 $2" in
     printf '%s\n' "$4" >> "$FIXTURE/tab-names"
     if test -f "$FIXTURE/herdr-ack-response.json"; then cat "$FIXTURE/herdr-ack-response.json"; exit 0; fi
     printf '{"result":{}}' ;;
+  'agent list')
+    printf 'list\n' >> "$FIXTURE/agent-list-calls"
+    if test -f "$FIXTURE/herdr-agents-response.json"; then cat "$FIXTURE/herdr-agents-response.json"; exit 0; fi
+    printf '{"result":{"agents":['
+    comma=
+    for entry in "$FIXTURE"/live-agents/*.json; do
+      test -f "$entry" || continue
+      printf '%s' "$comma"
+      cat "$entry"
+      comma=,
+    done
+    printf ']}}' ;;
   'agent start')
     printf '%s\n' "$@" >> "$FIXTURE/start-args"
     if test -f "$FIXTURE/herdr-json-error"; then printf '{"error":{"code":"agent_blocked","message":"approval pending","future_field":true}}'; exit 1; fi
     if test -f "$FIXTURE/agent-fails"; then echo 'agent_not_ready' >&2; exit 1; fi
+    mkdir -p "$FIXTURE/live-agents"
+    printf '{"name":"%s","agent":"%s","agent_status":"idle","pane_id":"w7:p9","future_field":true}' "$3" "$5" > "$FIXTURE/live-agents/$3.json"
     printf '{"result":{}}' ;;
   'agent prompt')
+    test -f "$FIXTURE/live-agents/$3.json" || exit 2
+    if test -f "$FIXTURE/prompt-fails"; then printf '{"error":{"code":"agent_blocked","message":"approval pending"}}' >&2; exit 1; fi
+    printf '%s\n' "$3" >> "$FIXTURE/prompt-targets"
     printf '%s\n' "$4" >> "$FIXTURE/prompts"
+    if test -f "$FIXTURE/prompt-lost-response"; then echo 'connection lost after input' >&2; exit 1; fi
     printf '{"result":{}}' ;;
   *) exit 2 ;;
 esac
@@ -162,62 +182,6 @@ case "${1:-}" in
   wait) printf '%s\n' "$$" > "$FIXTURE/scheduled-pid"; sleep 30 ;;
 esac
 printf 'scheduled output\n'
-"#),
-            ("agent", r#"
-printf '%s\0' "$@" > "$FIXTURE/agent-argv"
-printf '%s\n' "$PWD" > "$FIXTURE/agent-cwd"
-for argument do last="$argument"; done
-printf '%s\n' "$last" >> "$FIXTURE/prompts"
-"#),
-            ("tmux", r#"
-case "$1" in
-  has-session)
-    test "$2" = '-t' && test "$3" = '=test-tmux' || exit 2
-    test ! -f "$FIXTURE/server-down"
-    exit $? ;;
-  new-window)
-    printf '%s\n' "$@" > "$FIXTURE/multiplexer-args"
-    test ! -f "$FIXTURE/multiplexer-fails" || exit 1
-    shift
-    directory=
-    while test "$#" -gt 0; do
-      case "$1" in
-        --) shift; break ;;
-        -c) directory="$2"; shift 2 ;;
-        -d|-P) shift ;;
-        *) shift 2 ;;
-      esac
-    done
-    printf 'tmux\n' >> "$FIXTURE/launches"
-    (cd "$directory" && "$@")
-    if test -f "$FIXTURE/multiplexer-response.txt"; then cat "$FIXTURE/multiplexer-response.txt"; else printf '%%7\n'; fi ;;
-  *) exit 2 ;;
-esac
-"#),
-            ("zellij", r#"
-test "$1" = '--session' && test "$2" = 'test-zellij' && test "$3" = action || exit 2
-case "$4" in
-  query-tab-names)
-    test ! -f "$FIXTURE/server-down" || exit 1
-    printf 'existing-tab\n' ;;
-  new-tab)
-    printf '%s\n' "$@" > "$FIXTURE/multiplexer-args"
-    test ! -f "$FIXTURE/multiplexer-fails" || exit 1
-    shift 4
-    directory=
-    while test "$#" -gt 0; do
-      case "$1" in
-        --) shift; break ;;
-        --cwd) directory="$2"; shift 2 ;;
-        --no-focus) shift ;;
-        *) shift 2 ;;
-      esac
-    done
-    printf 'zellij\n' >> "$FIXTURE/launches"
-    (cd "$directory" && "$@")
-    if test -f "$FIXTURE/multiplexer-response.txt"; then cat "$FIXTURE/multiplexer-response.txt"; else printf '3\n'; fi ;;
-  *) exit 2 ;;
-esac
 "#),
         ] {
             let path = directory.join(name);
@@ -243,10 +207,6 @@ esac
             "gh_path": MOCK_TOOLS.get().unwrap().join("gh"),
             "git_path": MOCK_TOOLS.get().unwrap().join("git"),
             "herdr_path": MOCK_TOOLS.get().unwrap().join("herdr"),
-            "tmux_path": MOCK_TOOLS.get().unwrap().join("tmux"),
-            "zellij_path": MOCK_TOOLS.get().unwrap().join("zellij"),
-            "tmux_session": "test-tmux",
-            "zellij_session": "test-zellij",
         });
         cfg.as_object_mut()
             .unwrap()
@@ -360,27 +320,20 @@ fn own_mentions_only_paginated_and_deduplicated_across_restarts() {
 }
 
 #[test]
-fn github_comment_prefix_instruction_can_be_disabled_for_every_backend() {
-    for backend in ["herdr", "tmux", "zellij"] {
-        let f = Fixture::new();
-        let mut config = json!({"multiplexer":backend,"prefix_github_comments":false});
-        if backend != "herdr" {
-            config["agent"] = json!(MOCK_TOOLS.get().unwrap().join("agent"));
-        }
-        f.config(config);
-        f.write(
-            "issues.json",
-            &json!([[Fixture::comment(1, "alice", "@invo Do the work")]]),
-        );
-        f.success();
-        assert_eq!(f.launches(), 1, "{backend}");
-        assert_eq!(f.acknowledgements(), 1, "{backend}");
-        assert_eq!(
-            fs::read_to_string(f.root.join("prompts")).unwrap(),
-            "Work on it: https://github.com/alice/project/issues/42#issuecomment-1\n",
-            "{backend}"
-        );
-    }
+fn github_comment_prefix_instruction_can_be_disabled() {
+    let f = Fixture::new();
+    f.config(json!({"prefix_github_comments":false}));
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "@invo Do the work")]]),
+    );
+    f.success();
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 1);
+    assert_eq!(
+        fs::read_to_string(f.root.join("prompts")).unwrap(),
+        "Work on it: https://github.com/alice/project/issues/42#issuecomment-1\n"
+    );
 }
 
 #[test]
@@ -456,8 +409,8 @@ fn inline_review_comments_and_edits_can_summon() {
     f.success();
     assert_eq!(
         f.launches(),
-        2,
-        "issue and review comment IDs must be independent"
+        1,
+        "review follow-ups reuse the PR's existing agent"
     );
     assert_eq!(f.acknowledgements(), 2);
     let prompts = fs::read_to_string(f.root.join("prompts")).unwrap();
@@ -467,7 +420,7 @@ fn inline_review_comments_and_edits_can_summon() {
             "Work on it: https://github.com/alice/project/issues/42#issuecomment-1\n\n",
             "When posting a new comment on GitHub, start its body with \"gh-i-1:\".\n",
             "Work on it: https://github.com/alice/project/pull/42#discussion_r1\n\n",
-            "When posting a new comment on GitHub, start its body with \"gh-r-1:\".\n"
+            "When posting a new comment on GitHub, start its body with \"gh-i-1:\".\n"
         )
     );
 }
@@ -824,12 +777,12 @@ fn an_unquoted_mention_after_a_quote_or_example_still_summons() {
         .collect();
     f.write("issues.json", &json!([comments]));
     f.success();
-    assert_eq!(f.launches(), bodies.len());
+    assert_eq!(f.launches(), 1);
     assert_eq!(f.acknowledgements(), bodies.len());
     let prompts = fs::read_to_string(f.root.join("prompts")).unwrap();
     let expected: String = (100..100 + bodies.len())
         .map(|id| {
-            format!("Work on it: https://github.com/alice/project/issues/42#issuecomment-{id}\n\nWhen posting a new comment on GitHub, start its body with \"gh-i-{id}:\".\n")
+            format!("Work on it: https://github.com/alice/project/issues/42#issuecomment-{id}\n\nWhen posting a new comment on GitHub, start its body with \"gh-i-100:\".\n")
         })
         .collect();
     assert_eq!(prompts, expected);
@@ -863,151 +816,12 @@ fn herdr_workspace_and_tab_names_are_configurable_templates() {
 }
 
 #[test]
-fn tmux_and_zellij_launch_native_agents_with_literal_arguments_and_names() {
-    for (backend, target) in [("tmux", "%7"), ("zellij", "tab:3")] {
-        let f = Fixture::new();
-        let injected = f.root.join("must-not-exist");
-        let task = format!(
-            "Do not execute $(touch {}) or `touch {}`.\nKeep this apostrophe: ' and this semicolon: ;",
-            injected.display(),
-            injected.display()
-        );
-        f.config(
-            json!({"multiplexer":backend, "agent":MOCK_TOOLS.get().unwrap().join("agent"),
-            "agent_args":["--model", "a model with spaces", "literal ' \" $HOME ;"],
-            "tab_name":"Review {repository}#{issue_number}",
-            "acknowledgement_message":"Working through {multiplexer} in {session}: {comment_url}"}),
-        );
-        f.write(
-            "issues.json",
-            &json!([[Fixture::comment(1, "alice", &format!("@invo\n{task}"))]]),
-        );
-        f.success();
-        assert_eq!(f.launches(), 1, "{backend}");
-        assert_eq!(f.acknowledgements(), 1, "{backend}");
-        assert!(
-            !injected.exists(),
-            "task text was interpreted as a shell command"
-        );
-        let bytes = fs::read(f.root.join("agent-argv")).unwrap();
-        let argv: Vec<_> = bytes
-            .split(|byte| *byte == 0)
-            .filter(|value| !value.is_empty())
-            .map(|value| std::str::from_utf8(value).unwrap())
-            .collect();
-        assert_eq!(
-            &argv[..3],
-            ["--model", "a model with spaces", "literal ' \" $HOME ;"]
-        );
-        assert_eq!(
-            *argv.last().unwrap(),
-            "Work on it: https://github.com/alice/project/issues/42#issuecomment-1\n\nWhen posting a new comment on GitHub, start its body with \"gh-i-1:\"."
-        );
-        let cwd = fs::read_to_string(f.root.join("agent-cwd")).unwrap();
-        assert_eq!(
-            fs::canonicalize(cwd.trim()).unwrap(),
-            fs::canonicalize(f.root.join("checkout")).unwrap()
-        );
-        assert!(
-            fs::read_to_string(f.root.join("multiplexer-args"))
-                .unwrap()
-                .contains("Review alice/project#42")
-        );
-        let state = f.state();
-        let record = &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"];
-        assert_eq!(record["pane"], target);
-        assert_eq!(record["multiplexer"], backend);
-        assert_eq!(record["tab_name"], "Review alice/project#42");
-        assert!(
-            fs::read_to_string(f.root.join("ack-1.txt"))
-                .unwrap()
-                .contains(&format!("Working through {backend} in test-{backend}"))
-        );
-    }
-}
-
-#[test]
-fn unavailable_alternative_sessions_are_retried_without_claiming_work() {
-    for backend in ["tmux", "zellij"] {
-        let f = Fixture::new();
-        f.config(json!({"multiplexer":backend,"agent":MOCK_TOOLS.get().unwrap().join("agent")}));
-        f.write(
-            "issues.json",
-            &json!([[Fixture::comment(1, "alice", "@invo")]]),
-        );
-        fs::write(f.root.join("server-down"), "").unwrap();
-        assert!(!f.run().status.success());
-        assert_eq!(f.launches(), 0);
-        assert!(!fs::read_dir(&f.root).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with("reaction-")
-        }));
-        fs::remove_file(f.root.join("server-down")).unwrap();
-        f.success();
-        assert_eq!(f.launches(), 1);
-        assert_eq!(f.acknowledgements(), 1);
-    }
-}
-
-#[test]
-fn changing_multiplexer_does_not_repeat_a_claimed_comment() {
-    let f = Fixture::new();
-    f.write(
-        "issues.json",
-        &json!([[Fixture::comment(1, "alice", "@invo")]]),
-    );
-    f.success();
-    for backend in ["tmux", "zellij"] {
-        f.config(json!({"multiplexer":backend,"agent":MOCK_TOOLS.get().unwrap().join("agent")}));
-        f.success();
-        assert!(
-            f.command(&format!("machine-{backend}"))
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-    }
-    assert_eq!(f.launches(), 1);
-    assert_eq!(f.acknowledgements(), 1);
-}
-
-#[test]
-fn alternative_launcher_failures_keep_the_shared_claim() {
-    for backend in ["tmux", "zellij"] {
-        let f = Fixture::new();
-        f.config(json!({"multiplexer":backend,"agent":MOCK_TOOLS.get().unwrap().join("agent")}));
-        f.write(
-            "issues.json",
-            &json!([[Fixture::comment(1, "alice", "@invo")]]),
-        );
-        fs::write(f.root.join("multiplexer-fails"), "").unwrap();
-        f.success();
-        fs::remove_file(f.root.join("multiplexer-fails")).unwrap();
-        assert!(
-            f.command("another-machine")
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-        assert_eq!(f.launches(), 0);
-        assert_eq!(f.acknowledgements(), 0);
-        assert_eq!(
-            f.state()["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"]["status"],
-            "needs-attention"
-        );
-    }
-}
-
-#[test]
 fn invalid_backend_or_names_cannot_start_work() {
     let f = Fixture::new();
     for config in [
         json!({"multiplexer":"unknown"}),
+        json!({"multiplexer":"tmux"}),
+        json!({"multiplexer":"zellij"}),
         json!({"workspace_name":""}),
         json!({"tab_name":"two\nlines"}),
     ] {
@@ -1960,37 +1774,284 @@ fn herdr_cli_json_errors_keep_their_codes_even_with_a_nonzero_exit() {
 }
 
 #[test]
-fn malformed_native_mux_identifiers_preserve_claims_and_do_not_acknowledge() {
-    for (backend, replies) in [
-        ("tmux", vec!["%", "%7\n%8\n", "plain text"]),
-        ("zellij", vec!["-1", "4294967296", "3\n4\n", "+3"]),
-    ] {
-        for response in replies {
-            let f = Fixture::new();
-            f.config(
-                json!({"multiplexer":backend,"agent":MOCK_TOOLS.get().unwrap().join("agent")}),
-            );
-            fs::write(f.root.join("multiplexer-response.txt"), response).unwrap();
-            f.write(
-                "issues.json",
-                &json!([[Fixture::comment(1, "alice", "@invo Fix this")]]),
-            );
-            f.success();
-            let state = f.state();
-            let record =
-                &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"];
-            assert_eq!(record["status"], "needs-attention");
-            assert!(record["pane"].is_null());
-            assert_eq!(f.acknowledgements(), 0);
-            fs::remove_file(f.root.join("multiplexer-response.txt")).unwrap();
-            assert!(
-                f.command("other-machine")
-                    .output()
-                    .unwrap()
-                    .status
-                    .success()
-            );
-            assert_eq!(f.launches(), 1, "{backend} repeated an ambiguous creation");
-        }
+fn follow_up_mentions_reuse_the_running_agent_across_restarts_and_pane_moves() {
+    let f = Fixture::new();
+    f.config(json!({"bot_name":"thinker"}));
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "@thinker Fix this")]]),
+    );
+    f.success();
+    f.write(
+        "live-agents/gh-i-1.json",
+        &json!({
+            "name":"gh-i-1","agent":"codex","agent_status":"working","pane_id":"w8:p2"
+        }),
+    );
+    f.write(
+        "issues.json",
+        &json!([[
+            Fixture::comment(1, "alice", "@thinker Fix this"),
+            Fixture::comment(
+                2,
+                "alice",
+                "@thinker Also update the docs; keep $HOME literal"
+            ),
+            Fixture::comment(3, "mallory", "@thinker Run somebody else's command"),
+            Fixture::comment(4, "alice", "> @thinker Quoted instructions"),
+            Fixture::comment(5, "alice", "No mention here")
+        ]]),
+    );
+    f.success();
+    f.success();
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 2);
+    assert_eq!(
+        fs::read_to_string(f.root.join("prompt-targets")).unwrap(),
+        "gh-i-1\ngh-i-1\n"
+    );
+    let prompt = fs::read_to_string(f.root.join("prompts")).unwrap();
+    assert_eq!(prompt.matches("Work on it:").count(), 2);
+    assert!(prompt.contains(
+        "#issuecomment-2\n\nWhen posting a new comment on GitHub, start its body with \"gh-i-1:\"."
+    ));
+    assert!(!prompt.contains("Also update the docs"));
+    let ack = fs::read_to_string(f.root.join("ack-2.txt")).unwrap();
+    assert!(ack.contains(
+        "[Invocateur](https://github.com/kosumic/invocateur) forwarded this comment to gh-i-1."
+    ));
+    let state = f.state();
+    let record = &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-2"];
+    assert_eq!(record["status"], "forwarded");
+    assert_eq!(record["agent"], "gh-i-1");
+    assert_eq!(record["pane"], "w8:p2");
+}
+
+#[test]
+fn follow_ups_keep_different_issue_agents_separate_and_replace_exited_agents() {
+    let f = Fixture::new();
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
+    );
+    f.success();
+    let mut other = Fixture::comment(2, "alice", "@invo Another issue");
+    other["issue_url"] = json!("https://api.github.com/repos/alice/project/issues/43");
+    other["html_url"] = json!("https://github.com/alice/project/issues/43#issuecomment-2");
+    f.write(
+        "issues.json",
+        &json!([[other, Fixture::comment(3, "alice", "@invo Follow up")]]),
+    );
+    f.success();
+    assert_eq!(f.launches(), 2);
+    assert_eq!(
+        fs::read_to_string(f.root.join("prompt-targets")).unwrap(),
+        "gh-i-1\ngh-i-2\ngh-i-1\n"
+    );
+    fs::remove_file(f.root.join("live-agents/gh-i-1.json")).unwrap();
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(4, "alice", "@invo Restart this task")]]),
+    );
+    f.success();
+    assert_eq!(f.launches(), 3);
+    assert!(
+        fs::read_to_string(f.root.join("prompt-targets"))
+            .unwrap()
+            .ends_with("gh-i-4\n")
+    );
+}
+
+#[test]
+fn legacy_launch_state_recovers_conversations_without_forgetting_old_backend_claims() {
+    let f = Fixture::new();
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
+    );
+    f.success();
+    let mut state = f.state();
+    let repo = &mut state["repositories"]["github.com/alice/alice/project"];
+    repo.as_object_mut().unwrap().remove("conversations");
+    repo["launches"]["i-1"]
+        .as_object_mut()
+        .unwrap()
+        .remove("issue_number");
+    let mut historical = repo["launches"]["i-1"].clone();
+    historical["multiplexer"] = json!("tmux");
+    historical["pane"] = json!("%7");
+    historical["agent"] = json!("gh-i-9");
+    repo["launches"]["i-9"] = historical;
+    f.write("state/state.json", &state);
+    f.write(
+        "issues.json",
+        &json!([[
+            Fixture::comment(2, "alice", "@invo Continue"),
+            Fixture::comment(9, "alice", "@invo Already claimed historically")
+        ]]),
+    );
+    f.success();
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 2);
+    assert_eq!(
+        fs::read_to_string(f.root.join("prompt-targets")).unwrap(),
+        "gh-i-1\ngh-i-1\n"
+    );
+    assert_eq!(
+        f.state()["repositories"]["github.com/alice/alice/project"]["launches"]["i-9"]["multiplexer"],
+        "tmux"
+    );
+}
+
+#[test]
+fn blocked_unknown_or_malformed_agent_reads_defer_follow_ups_without_claiming_them() {
+    let replies = [
+        json!({"result":{"agents":[{"name":"gh-i-1","agent":"codex","agent_status":"blocked","pane_id":"w7:p9"}]}}),
+        json!({"result":{"agents":[{"name":"gh-i-1","agent":"codex","agent_status":"unknown","pane_id":"w7:p9"}]}}),
+        json!({"result":{"agents":[{"name":"gh-i-1","agent":"codex","agent_status":"idle","pane_id":"bad-pane"}]}}),
+        json!({"result":{"agents":[{"name":"gh-i-1","agent":"codex","agent_status":"idle","launch_pending":true,"pane_id":"w7:p9"}]}}),
+        json!({"result":{"agents":[{"name":"gh-i-1","agent":null,"agent_status":"idle","pane_id":"w7:p9"}]}}),
+        json!({"result":{"agents":[
+            {"name":"gh-i-1","agent":"codex","agent_status":"idle","pane_id":"w7:p9"},
+            {"name":"gh-i-1","agent":"codex","agent_status":"idle","pane_id":"w8:p2"}
+        ]}}),
+        json!({"result":{"agents":"not-a-list"}}),
+        json!({"result":{}}),
+    ];
+    for reply in replies {
+        let f = Fixture::new();
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(1, "alice", "@invo")]]),
+        );
+        f.success();
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(2, "alice", "@invo Continue")]]),
+        );
+        f.write("herdr-agents-response.json", &reply);
+        assert!(!f.run().status.success());
+        assert_eq!(f.launches(), 1);
+        assert_eq!(f.acknowledgements(), 1);
+        assert!(!f.root.join("reaction-issues_comments_2_reactions").exists());
+        fs::remove_file(f.root.join("herdr-agents-response.json")).unwrap();
+        f.success();
+        assert_eq!(f.launches(), 1);
+        assert_eq!(f.acknowledgements(), 2);
+        assert_eq!(
+            f.state()["repositories"]["github.com/alice/alice/project"]["launches"]["i-2"]["status"],
+            "forwarded"
+        );
     }
+}
+
+#[test]
+fn failed_or_ambiguous_follow_up_input_is_never_resent_or_replaced() {
+    for failure in ["prompt-fails", "prompt-lost-response"] {
+        let f = Fixture::new();
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(1, "alice", "@invo")]]),
+        );
+        f.success();
+        f.write(
+            "issues.json",
+            &json!([[Fixture::comment(2, "alice", "@invo Continue")]]),
+        );
+        fs::write(f.root.join(failure), "").unwrap();
+        f.success();
+        fs::remove_file(f.root.join(failure)).unwrap();
+        f.success();
+        assert!(
+            f.command("other-machine")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert_eq!(f.launches(), 1);
+        assert_eq!(f.acknowledgements(), 1);
+        let state = f.state();
+        let record = &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-2"];
+        assert_eq!(record["status"], "needs-attention");
+        assert_eq!(record["pane"], "w7:p9");
+        if failure == "prompt-fails" {
+            assert!(record["error"].as_str().unwrap().contains("agent_blocked"));
+        }
+        assert_eq!(
+            fs::read_to_string(f.root.join("prompt-targets"))
+                .unwrap()
+                .lines()
+                .count(),
+            if failure == "prompt-lost-response" {
+                2
+            } else {
+                1
+            }
+        );
+    }
+}
+
+#[test]
+fn simultaneous_follow_ups_with_shared_history_are_delivered_and_acknowledged_once() {
+    let f = Fixture::new();
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
+    );
+    f.success();
+    for directory in ["machine-a", "machine-b"] {
+        fs::create_dir_all(f.root.join(directory)).unwrap();
+        fs::copy(
+            f.root.join("state/state.json"),
+            f.root.join(directory).join("state.json"),
+        )
+        .unwrap();
+    }
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(2, "alice", "@invo Continue")]]),
+    );
+    fs::write(f.root.join("claim-barrier"), "").unwrap();
+    let first = f.command("machine-a").spawn().unwrap();
+    let second = f.command("machine-b").spawn().unwrap();
+    assert!(first.wait_with_output().unwrap().status.success());
+    assert!(second.wait_with_output().unwrap().status.success());
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 2);
+    assert_eq!(
+        fs::read_to_string(f.root.join("prompt-targets")).unwrap(),
+        "gh-i-1\ngh-i-1\n"
+    );
+}
+
+#[test]
+fn follow_up_acknowledgements_and_prefix_instructions_remain_configurable() {
+    let f = Fixture::new();
+    f.config(json!({"prefix_github_comments":false,
+        "followup_acknowledgement_message":"@invo Forwarded {comment_url} to {agent_name} in {session}"}));
+    f.write(
+        "issues.json",
+        &json!([[
+            Fixture::comment(1, "alice", "@invo"),
+            Fixture::comment(2, "alice", "@invo Continue")
+        ]]),
+    );
+    f.success();
+    let ack = fs::read_to_string(f.root.join("ack-2.txt")).unwrap();
+    assert!(ack.contains("to gh-i-1 in test-session"));
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(3, "alice", &ack)]]),
+    );
+    f.success();
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 2);
+    assert_eq!(
+        fs::read_to_string(f.root.join("prompts")).unwrap(),
+        concat!(
+            "Work on it: https://github.com/alice/project/issues/42#issuecomment-1\n",
+            "Work on it: https://github.com/alice/project/issues/42#issuecomment-2\n"
+        )
+    );
 }

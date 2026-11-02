@@ -6,7 +6,11 @@ use serde::{
     Deserialize,
     de::{DeserializeOwned, IgnoredAny},
 };
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::Path,
+};
 
 pub trait Request {
     type Response: DeserializeOwned;
@@ -52,8 +56,13 @@ impl<'a> Client<'a> {
             self.cfg.command_timeout_seconds,
             None,
         )?;
+        let bytes = if output.stdout.is_empty() && !output.status.success() {
+            &output.stderr
+        } else {
+            &output.stdout
+        };
         let envelope: Envelope<R::Response> =
-            match serde_json::from_slice::<Object<Envelope<R::Response>>>(&output.stdout)
+            match serde_json::from_slice::<Object<Envelope<R::Response>>>(bytes)
                 .map(|object| object.value)
             {
                 Ok(envelope) => envelope,
@@ -227,5 +236,71 @@ impl Request for PromptAgent<'_> {
     const OPERATION: &'static str = "agent.prompt";
     fn argv(&self) -> Vec<String> {
         args(&["agent", "prompt", self.name, self.text])
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AgentStatus {
+    Idle,
+    Working,
+    Blocked,
+    Done,
+    Unknown,
+}
+#[derive(Deserialize)]
+struct AgentInfo {
+    name: Option<String>,
+    agent: Option<String>,
+    agent_status: AgentStatus,
+    #[serde(default)]
+    launch_pending: bool,
+    pane_id: HerdrPaneId,
+}
+#[derive(Deserialize)]
+pub struct Agents {
+    agents: Vec<Object<AgentInfo>>,
+}
+impl Agents {
+    pub fn find(&self, names: &BTreeSet<String>) -> Result<Option<super::RunningAgent>> {
+        let mut found = None;
+        for object in &self.agents {
+            let agent = &object.value;
+            let Some(name) = agent.name.as_ref().filter(|name| names.contains(*name)) else {
+                continue;
+            };
+            ensure!(
+                found.is_none(),
+                "multiple live Herdr agents match this conversation; inspect them before retrying"
+            );
+            ensure!(
+                agent.agent.is_some(),
+                "Herdr target {name} no longer hosts an agent"
+            );
+            ensure!(
+                !agent.launch_pending,
+                "Herdr agent {name} is still starting; retry on a later poll"
+            );
+            ensure!(
+                matches!(
+                    agent.agent_status,
+                    AgentStatus::Idle | AgentStatus::Working | AgentStatus::Done
+                ),
+                "Herdr agent {name} is blocked or its state is unknown; not sending input or starting another agent"
+            );
+            found = Some(super::RunningAgent {
+                name: name.clone(),
+                target: super::LaunchTarget::HerdrPane(agent.pane_id.clone()),
+            });
+        }
+        Ok(found)
+    }
+}
+pub struct ListAgents;
+impl Request for ListAgents {
+    type Response = Agents;
+    const OPERATION: &'static str = "agent.list";
+    fn argv(&self) -> Vec<String> {
+        args(&["agent", "list"])
     }
 }

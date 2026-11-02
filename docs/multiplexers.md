@@ -1,23 +1,24 @@
 # Multiplexer adapter contracts
 
-Invocateur uses typed Rust request and response models over the supported CLIs.
-The common boundary is `LaunchRequest` → `LaunchResponse`, with a `LaunchTarget`
-variant identifying a Herdr pane, tmux pane, or Zellij tab. Backend-specific ID
-newtypes validate the native identifier format before it can become a command
-target. Pane and tab identifiers are not interchangeable.
+Invocateur supports Herdr only, using typed Rust request and response models over
+its public CLI. The common launch boundary is `LaunchRequest` → `LaunchResponse`,
+with a validated Herdr pane ID in `LaunchTarget`. Pane, tab, and workspace IDs
+have distinct Rust types and cannot be interchanged.
 
-| Adapter | Requests | Responses |
-| --- | --- | --- |
-| Herdr | `ListWorkspaces`, `CreateWorkspace`, `RenameTab`, `StartAgent`, `PromptAgent` | Typed JSON envelopes and operation-specific bodies |
-| tmux | `HasSession`, `NewWindow` | Successful session check or validated `%N` pane ID from `new-window -P -F` |
-| Zellij | `QueryTabs`, `NewTab` | Successful session check or validated unsigned tab ID |
+| Requests | Responses |
+| --- | --- |
+| `ListWorkspaces` | Typed workspace summaries |
+| `ListAgents` | Typed live identities, pane IDs, and lifecycle states |
+| `CreateWorkspace` | Validated root pane and tab metadata |
+| `RenameTab`, `StartAgent`, `PromptAgent` | Object-shaped acknowledgements |
 
 Herdr requests associate their response type at compile time. The decoder accepts
 unknown extension fields, requires object-shaped envelopes and results, and
 rejects missing or conflicting success/error fields. A successful result also
 requires a successful CLI exit. Structured remote failures retain their code and
-message even when the CLI exits nonzero. The Herdr CLI continues to provide its
-existing interactive-startup readiness checks.
+message even when the CLI exits nonzero or writes its structured error to stderr.
+The Herdr CLI continues to provide its existing interactive-startup readiness
+checks.
 
 A workspace-creation response may contain a valid pane alongside missing or
 malformed tab metadata. The adapter checkpoints that validated pane before
@@ -26,6 +27,14 @@ commands. Pane and tab IDs must identify the same workspace. Invalid identifiers
 or ambiguous responses never produce a started acknowledgement or an automatic
 second dispatch.
 
-The triggers persist targets in the existing formats (`wN:pN`, `%N`, and
-`tab:N`). State files and the schedule HTTP API retain their current formats.
-No direct/private multiplexer wire protocol is used by these adapters.
+GitHub conversation associations persist the owning agent's name and session.
+Follow-ups look up that name in the live `agent list` response and use
+`agent prompt` to submit input atomically. They never use raw shell input. Pane
+moves are reflected in the live pane ID; blocked, unknown, ambiguous, or malformed
+responses defer work before claiming the comment. A missing named agent permits
+a replacement launch. After a claim, ambiguous dispatches retain their durable
+record and are never automatically replayed.
+
+New targets persist as `wN:pN`. Historical records from removed backends remain
+readable for deduplication but are never used as active targets. The schedule
+HTTP API keeps its current format. No private multiplexer wire protocol is used.
