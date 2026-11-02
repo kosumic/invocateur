@@ -23,7 +23,7 @@ struct Config {
     multiplexer: Multiplexer,
     workspace_name: String,
     tab_name: String,
-    spells: Vec<String>,
+    bot_name: String,
     agent: String,
     agent_args: Vec<String>,
     acknowledgement_message: String,
@@ -53,7 +53,7 @@ impl Default for Config {
             multiplexer: Multiplexer::Herdr,
             workspace_name: "{repository}#{issue_number} {agent_name}".into(),
             tab_name: "{agent_name}".into(),
-            spells: vec!["summon".into()],
+            bot_name: "invo".into(),
             agent: "codex".into(),
             agent_args: vec![],
             acknowledgement_message:
@@ -86,7 +86,14 @@ impl Config {
             .with_context(|| format!("cannot read config {}", path.display()))?;
         let mut cfg: Self = toml::from_str(&text)
             .with_context(|| format!("invalid TOML config {}", path.display()))?;
-        ensure!(!cfg.spells.is_empty(), "configure at least one spell");
+        ensure!(
+            !cfg.bot_name.is_empty()
+                && cfg
+                    .bot_name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+            "bot_name must contain only letters, digits, underscores, or hyphens, without @"
+        );
         for template in [&cfg.workspace_name, &cfg.tab_name] {
             ensure!(
                 !template.trim().is_empty() && !template.chars().any(char::is_control),
@@ -98,12 +105,6 @@ impl Config {
                 && cfg.acknowledgement_message.len() <= 60_000,
             "acknowledgement_message must be nonempty and at most 60,000 UTF-8 bytes"
         );
-        for spell in &cfg.spells {
-            ensure!(
-                !spell.trim().is_empty() && spell.trim() == spell && !spell.contains(['\r', '\n']),
-                "spells must be nonempty, single lines without surrounding whitespace"
-            );
-        }
         ensure!(
             cfg.poll_interval_seconds > 0,
             "poll interval must be positive"
@@ -653,9 +654,9 @@ fn discover_github(
     save(state_file, state)
 }
 
-// Match source lines only where CommonMark recognizes ordinary, unquoted text.
-fn task(body: &str, spells: &[String]) -> Option<String> {
-    // A custom acknowledgement can itself contain a configured spell. Never summon from it.
+// Match mentions only where CommonMark recognizes ordinary, unquoted text.
+fn task(body: &str, bot_name: &str) -> Option<String> {
+    // A custom acknowledgement can itself mention the bot. Never summon from it.
     if body.trim_start().starts_with("<!-- invocateur:ack:") {
         return None;
     }
@@ -694,28 +695,68 @@ fn task(body: &str, spells: &[String]) -> Option<String> {
             _ => {}
         }
     }
-    let mut found = false;
-    let mut lines = vec![];
-    let mut offset = 0;
-    for raw_line in body.split_inclusive('\n') {
-        let line = raw_line.trim_end_matches('\n').trim_end_matches('\r');
-        let trimmed = line.trim();
-        let indented = line.starts_with("    ") || line.starts_with('\t');
-        let start = offset + line.len() - line.trim_start().len();
-        let end = start + trimmed.len();
-        if !indented
-            && spells.iter().any(|spell| spell == trimmed)
+    // Also exclude literal quoted speech in otherwise ordinary Markdown text.
+    // Apostrophes inside words are not opening quotes.
+    let mut quote = None;
+    let mut quoted_ranges = vec![];
+    for range in &text_ranges {
+        for (relative, character) in body[range.clone()].char_indices() {
+            let offset = range.start + relative;
+            let previous = body[..offset].chars().next_back();
+            let next = body[offset + character.len_utf8()..].chars().next();
+            if let Some((closing, start)) = quote {
+                if character == closing
+                    && !(matches!(closing, '\'' | '’') && next.is_some_and(char::is_alphanumeric))
+                {
+                    quoted_ranges.push(start..offset + character.len_utf8());
+                    quote = None;
+                }
+            } else if previous.is_none_or(|c| !c.is_alphanumeric()) {
+                let closing = match character {
+                    '"' => Some('"'),
+                    '\'' => Some('\''),
+                    '“' => Some('”'),
+                    '‘' => Some('’'),
+                    _ => None,
+                };
+                if let Some(closing) = closing {
+                    quote = Some((closing, offset));
+                }
+            }
+        }
+    }
+    if let Some((_, start)) = quote {
+        quoted_ranges.push(start..body.len());
+    }
+
+    let mention = format!("@{}", bot_name.to_ascii_lowercase());
+    let lower = body.to_ascii_lowercase();
+    let mut instruction = String::new();
+    let mut cursor = 0;
+    for (start, _) in lower.match_indices(&mention) {
+        let end = start + mention.len();
+        let before = body[..start].chars().next_back();
+        let mut following = body[end..].chars();
+        let after = following.next();
+        let start_boundary = before.is_none_or(|c| c.is_whitespace() || "([{".contains(c));
+        let end_boundary = after.is_none_or(|c| c.is_whitespace() || ")]},:;!?.".contains(c))
+            && !(after == Some('.') && following.next().is_some_and(char::is_alphanumeric));
+        if start_boundary
+            && end_boundary
             && text_ranges
                 .iter()
                 .any(|range| range.start <= start && end <= range.end)
+            && !quoted_ranges.iter().any(|range| range.contains(&start))
         {
-            found = true;
-        } else {
-            lines.push(line);
+            instruction.push_str(&body[cursor..start]);
+            cursor = end;
         }
-        offset += raw_line.len();
     }
-    found.then(|| lines.join("\n").trim().to_owned())
+    if cursor == 0 {
+        return None;
+    }
+    instruction.push_str(&body[cursor..]);
+    Some(instruction.trim().to_owned())
 }
 
 fn issue_number(comment: &Comment) -> Result<u64> {
@@ -785,7 +826,7 @@ fn poll_repo(
         {
             continue;
         }
-        let Some(instruction) = task(comment.body.as_deref().unwrap_or(""), &client.0.spells)
+        let Some(instruction) = task(comment.body.as_deref().unwrap_or(""), &client.0.bot_name)
         else {
             continue;
         };

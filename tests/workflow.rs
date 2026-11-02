@@ -287,23 +287,23 @@ esac
 }
 
 #[test]
-fn own_standalone_spells_only_paginated_and_deduplicated_across_restarts() {
+fn own_mentions_only_paginated_and_deduplicated_across_restarts() {
     let f = Fixture::new();
     f.write(
         "issues.json",
         &json!([
             [
-                Fixture::comment(1, "mallory", "summon"),
+                Fixture::comment(1, "mallory", "@invo"),
                 Fixture::comment(2, "alice", "please summon this")
             ],
             [
-                Fixture::comment(3, "alice", "> summon"),
-                Fixture::comment(4, "alice", "```text\nsummon\n```"),
-                Fixture::comment(5, "alice", "    summon"),
+                Fixture::comment(3, "alice", "> @invo"),
+                Fixture::comment(4, "alice", "```text\n@invo\n```"),
+                Fixture::comment(5, "alice", "    @invo"),
                 Fixture::comment(
                     6,
                     "ALICE",
-                    "summon\nFix this; $(touch /tmp/never) `literal`\nwith a second line"
+                    "@invo\nFix this; $(touch /tmp/never) `literal`\nwith a second line"
                 )
             ]
         ]),
@@ -337,16 +337,16 @@ fn own_standalone_spells_only_paginated_and_deduplicated_across_restarts() {
 }
 
 #[test]
-fn configurable_spell_agent_arguments_directory_and_interval() {
+fn configurable_mention_agent_arguments_directory_and_interval() {
     let f = Fixture::new();
     fs::create_dir_all(f.root.join("custom/repos/project/.git")).unwrap();
-    f.config(json!({"spells":["abracadabra", "/fix"], "agent":"claude", "agent_args":["--model", "example"],
+    f.config(json!({"bot_name":"helper", "agent":"claude", "agent_args":["--model", "example"],
         "poll_interval_seconds":7, "repos_directory":f.root.join("custom/repos"), "repositories":{}, "discover_repositories":true}));
     f.write(
         "issues.json",
         &json!([[
-            Fixture::comment(1, "alice", "summon"),
-            Fixture::comment(2, "alice", "/fix\nDo the work")
+            Fixture::comment(1, "alice", "@invo"),
+            Fixture::comment(2, "alice", "@helper Do the work")
         ]]),
     );
     f.success();
@@ -398,9 +398,9 @@ fn inline_review_comments_and_edits_can_summon() {
     assert_eq!(f.launches(), 0);
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon\nEdited task")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo\nEdited task")]]),
     );
-    let mut review = Fixture::comment(1, "alice", "summon\nFix this line");
+    let mut review = Fixture::comment(1, "alice", "@invo\nFix this line");
     review.as_object_mut().unwrap().remove("issue_url");
     review["pull_request_url"] = json!("https://api.github.com/repos/alice/project/pulls/42");
     f.write("reviews.json", &json!([[review]]));
@@ -420,11 +420,11 @@ fn default_startup_ignores_history() {
     f.config(json!({"initial_lookback_seconds":0}));
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     f.success();
     assert_eq!(f.launches(), 0);
-    let mut future = Fixture::comment(2, "alice", "summon");
+    let mut future = Fixture::comment(2, "alice", "@invo");
     future["updated_at"] = json!((Utc::now() + Duration::seconds(1)).to_rfc3339());
     f.write("issues.json", &json!([[future]]));
     f.success();
@@ -436,7 +436,7 @@ fn failed_poll_or_unavailable_server_is_retried_without_losing_comments() {
     let f = Fixture::new();
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     fs::write(f.root.join("api-fails"), "").unwrap();
     assert!(!f.run().status.success());
@@ -454,7 +454,7 @@ fn ambiguous_launch_failure_is_recorded_and_never_automatically_duplicated() {
     let f = Fixture::new();
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     fs::write(f.root.join("agent-fails"), "").unwrap();
     f.success();
@@ -479,7 +479,7 @@ fn invalid_config_and_corrupted_state_fail_without_launching() {
     let f = Fixture::new();
     f.config(json!({"poll_interval_seconds":0}));
     assert!(!f.run().status.success());
-    f.config(json!({"spells":[""]}));
+    f.config(json!({"bot_name":""}));
     assert!(!f.run().status.success());
     f.config(json!({"acknowledgement_message":"  "}));
     assert!(!f.run().status.success());
@@ -503,7 +503,7 @@ fn comments_across_github_discover_and_clone_new_repositories() {
         &json!([{"total_count":1,"incomplete_results":false,"items":[
         {"repository_url":"https://api.github.com/repos/alice/project"}]}]),
     );
-    let mut comment = Fixture::comment(1, "alice", "summon\nImplement the fix");
+    let mut comment = Fixture::comment(1, "alice", "@invo\nImplement the fix");
     comment["updated_at"] = json!((Utc::now() + Duration::seconds(1)).to_rfc3339());
     f.write("issues.json", &json!([[comment]]));
     // A failed read after discovery must not forget the repository when search moves on.
@@ -540,7 +540,7 @@ fn global_discovery_reuses_matching_checkout_and_respects_clone_missing() {
     );
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     f.success();
     assert_eq!(f.launches(), 1);
@@ -563,7 +563,7 @@ fn global_discovery_reuses_matching_checkout_and_respects_clone_missing() {
     );
     other.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     assert!(!other.run().status.success());
     assert!(!other.root.join("clones").exists());
@@ -575,7 +575,7 @@ fn simultaneous_services_with_independent_state_launch_and_acknowledge_once() {
     let f = Fixture::new();
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     fs::write(f.root.join("claim-barrier"), "").unwrap();
     let first = f.command("machine-a").spawn().unwrap();
@@ -601,18 +601,18 @@ fn simultaneous_services_with_independent_state_launch_and_acknowledge_once() {
 #[test]
 fn custom_acknowledgements_expand_placeholders_and_cannot_summon_agents() {
     let f = Fixture::new();
-    f.config(json!({"acknowledgement_message":"summon\n{agent} is working on {repository}#{issue_number}\n{comment_url}"}));
+    f.config(json!({"acknowledgement_message":"@invo\n{agent} is working on {repository}#{issue_number}\n{comment_url}"}));
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     f.success();
     let body = fs::read_to_string(f.root.join("ack-1.txt")).unwrap();
-    assert!(body.contains("summon\ncodex is working on alice/project#42\nhttps://github.com/alice/project/issues/42#issuecomment-1"));
+    assert!(body.contains("@invo\ncodex is working on alice/project#42\nhttps://github.com/alice/project/issues/42#issuecomment-1"));
     f.write(
         "issues.json",
         &json!([[
-            Fixture::comment(1, "alice", "summon"),
+            Fixture::comment(1, "alice", "@invo"),
             Fixture::comment(2, "alice", &body)
         ]]),
     );
@@ -637,7 +637,7 @@ fn a_failed_or_ambiguous_claim_never_launches_an_agent() {
         let f = Fixture::new();
         f.write(
             "issues.json",
-            &json!([[Fixture::comment(1, "alice", "summon")]]),
+            &json!([[Fixture::comment(1, "alice", "@invo")]]),
         );
         fs::write(f.root.join(failure), "").unwrap();
         f.success();
@@ -671,7 +671,7 @@ fn acknowledgement_failures_do_not_restart_work_or_duplicate_comments() {
         let f = Fixture::new();
         f.write(
             "issues.json",
-            &json!([[Fixture::comment(1, "alice", "summon")]]),
+            &json!([[Fixture::comment(1, "alice", "@invo")]]),
         );
         fs::write(f.root.join(failure), "").unwrap();
         f.success();
@@ -695,27 +695,38 @@ fn acknowledgement_failures_do_not_restart_work_or_duplicate_comments() {
 }
 
 #[test]
-fn quoted_or_example_spells_never_claim_or_start_work() {
+fn quoted_or_example_mentions_never_claim_or_start_work() {
     let f = Fixture::new();
     let quoted = [
-        "> summon",
-        "> Someone else's instructions:\nsummon",
-        "> > Nested third-party quote:\nsummon",
-        "Someone wrote:\n\n> Please run this:\nsummon\n> End of quote",
-        "```markdown\nsummon\n```",
-        "~~~~text\nsummon\n~~~~",
-        "    summon",
-        "\tsummon",
-        "`quoted text\nsummon\nends here`",
-        "\"summon\"",
-        "'summon'",
-        "“summon”",
-        "<blockquote>\n\nsummon\n\n</blockquote>",
-        "<BLOCKQUOTE cite=\"https://example.com\">\n\nsummon\n\n</BLOCKQUOTE>",
-        "<q>\nsummon\n</q>",
-        "<!-- copied instructions:\nsummon\n-->",
-        "![copied example\nsummon\n](https://example.com)",
-        "[copied example\nsummon\n](https://example.com)",
+        "> @invo",
+        "> Someone else's instructions:\n@invo",
+        "> > Nested third-party quote:\n@invo",
+        "Someone wrote:\n\n> Please run this:\n@invo\n> End of quote",
+        "```markdown\n@invo\n```",
+        "~~~~text\n@invo\n~~~~",
+        "    @invo",
+        "\t@invo",
+        "`quoted text\n@invo\nends here`",
+        "\"@invo\"",
+        "'@invo'",
+        "“@invo”",
+        "Someone said \"please @invo fix this\".",
+        "Someone said 'please @invo fix this'.",
+        "Someone said ‘please @invo fix this’.",
+        "email@invo.com",
+        "@invo.example",
+        "@invo-other fix this",
+        "@invo_extra fix this",
+        "@invo2 fix this",
+        "@@invo fix this",
+        "\\@invo fix this",
+        "summon",
+        "<blockquote>\n\n@invo\n\n</blockquote>",
+        "<BLOCKQUOTE cite=\"https://example.com\">\n\n@invo\n\n</BLOCKQUOTE>",
+        "<q>\n@invo\n</q>",
+        "<!-- copied instructions:\n@invo\n-->",
+        "![copied example\n@invo\n](https://example.com)",
+        "[copied example\n@invo\n](https://example.com)",
     ];
     let comments: Vec<_> = quoted
         .iter()
@@ -736,13 +747,17 @@ fn quoted_or_example_spells_never_claim_or_start_work() {
 }
 
 #[test]
-fn an_unquoted_spell_after_a_quote_or_example_still_summons() {
+fn an_unquoted_mention_after_a_quote_or_example_still_summons() {
     let f = Fixture::new();
     let bodies = [
-        "> Someone else's command:\n> summon\n\nsummon\nFix the actual issue.",
-        "```text\nsummon\n```\n\nsummon\nFix the actual issue.",
-        "`summon`\n\nsummon\nFix the actual issue.",
-        "  summon  \r\nFix the actual issue.",
+        "> Someone else's command:\n> @invo\n\n@invo\nFix the actual issue.",
+        "```text\n@invo\n```\n\n@invo\nFix the actual issue.",
+        "`@invo`\n\n@invo\nFix the actual issue.",
+        "  @invo  \r\nFix the actual issue.",
+        "@invo Fix the actual issue.",
+        "Please @InVo Fix the actual issue.",
+        "I'm asking @invo Fix the actual issue.",
+        "(@invo) Fix the actual issue.",
     ];
     let comments: Vec<_> = bodies
         .iter()
@@ -769,7 +784,7 @@ fn herdr_workspace_and_tab_names_are_configurable_templates() {
     );
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     f.success();
     assert!(
@@ -805,7 +820,7 @@ fn tmux_and_zellij_launch_native_agents_with_literal_arguments_and_names() {
         );
         f.write(
             "issues.json",
-            &json!([[Fixture::comment(1, "alice", &format!("summon\n{task}"))]]),
+            &json!([[Fixture::comment(1, "alice", &format!("@invo\n{task}"))]]),
         );
         f.success();
         assert_eq!(f.launches(), 1, "{backend}");
@@ -855,7 +870,7 @@ fn unavailable_alternative_sessions_are_retried_without_claiming_work() {
         f.config(json!({"multiplexer":backend,"agent":MOCK_TOOLS.get().unwrap().join("agent")}));
         f.write(
             "issues.json",
-            &json!([[Fixture::comment(1, "alice", "summon")]]),
+            &json!([[Fixture::comment(1, "alice", "@invo")]]),
         );
         fs::write(f.root.join("server-down"), "").unwrap();
         assert!(!f.run().status.success());
@@ -879,7 +894,7 @@ fn changing_multiplexer_does_not_repeat_a_claimed_comment() {
     let f = Fixture::new();
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     f.success();
     for backend in ["tmux", "zellij"] {
@@ -904,7 +919,7 @@ fn alternative_launcher_failures_keep_the_shared_claim() {
         f.config(json!({"multiplexer":backend,"agent":MOCK_TOOLS.get().unwrap().join("agent")}));
         f.write(
             "issues.json",
-            &json!([[Fixture::comment(1, "alice", "summon")]]),
+            &json!([[Fixture::comment(1, "alice", "@invo")]]),
         );
         fs::write(f.root.join("multiplexer-fails"), "").unwrap();
         f.success();
@@ -939,7 +954,7 @@ fn invalid_backend_or_names_cannot_start_work() {
     f.config(json!({"workspace_name":"x".repeat(257)}));
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     assert!(!f.run().status.success());
     assert_eq!(f.launches(), 0);
@@ -962,7 +977,7 @@ fn global_mode_uses_local_checkouts_for_reuse_without_polling_idle_repositories(
     );
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     f.success();
     assert_eq!(
@@ -987,7 +1002,7 @@ fn global_mode_uses_local_checkouts_for_reuse_without_polling_idle_repositories(
     );
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(2, "alice", "summon")]]),
+        &json!([[Fixture::comment(2, "alice", "@invo")]]),
     );
     f.success();
     assert_eq!(
@@ -1003,7 +1018,7 @@ fn explicit_repository_mappings_are_polled_even_without_global_search_results() 
     f.config(json!({"discover_github_repositories":true}));
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "summon")]]),
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
     );
     f.success();
     assert_eq!(f.launches(), 1);
@@ -1018,7 +1033,7 @@ fn toml_comments_literal_strings_tables_and_multiline_acknowledgements_work() {
         &path,
         format!(
             r#"# Custom invocation settings; the repository table is below.
-spells = ['abracadabra'] # TOML comments are supported
+bot_name = 'helper' # TOML comments are supported
 agent_args = ['--model', 'example']
 acknowledgement_message = '''
 Working on {{repository}}#{{issue_number}}.
@@ -1030,7 +1045,7 @@ Agent: {{agent}}
     .unwrap();
     f.write(
         "issues.json",
-        &json!([[Fixture::comment(1, "alice", "abracadabra\nFix this")]]),
+        &json!([[Fixture::comment(1, "alice", "@helper Fix this")]]),
     );
     f.success();
     assert_eq!(f.launches(), 1);
@@ -1052,10 +1067,9 @@ fn toml_parse_type_and_unknown_setting_errors_report_the_config_path() {
     let f = Fixture::new();
     let path = f.root.join("config.toml");
     for text in [
-        "spells = [",
+        "bot_name = \"",
         "poll_interval_seconds = 'sixty'",
         "poll_intervl_seconds = 60",
-        r#"{"spells":["summon"]}"#,
     ] {
         fs::write(&path, text).unwrap();
         let output = f.command("state").arg("--check-config").output().unwrap();

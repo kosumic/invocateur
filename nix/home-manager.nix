@@ -13,7 +13,8 @@
     then cfg.tmuxPackage
     else cfg.zellijPackage;
   settings = {
-    inherit (cfg) spells agent repositories multiplexer;
+    inherit (cfg) agent repositories multiplexer;
+    bot_name = cfg.botName;
     workspace_name = cfg.workspaceName;
     tab_name = cfg.tabName;
     agent_args = cfg.agentArgs;
@@ -48,7 +49,7 @@
   configFile = (pkgs.formats.toml {}).generate "invocateur.toml" settings;
 in {
   options.services.invocateur = {
-    enable = mkEnableOption "GitHub comment spells that start coding agents in a terminal multiplexer";
+    enable = mkEnableOption "GitHub bot mentions that start coding agents in a terminal multiplexer";
     multiplexer = mkOption {
       type = types.enum ["herdr" "tmux" "zellij"];
       default = "herdr";
@@ -84,11 +85,11 @@ in {
       default = pkgs.zellij;
       description = "Zellij package used when multiplexer is zellij. Requires support for new-tab --no-focus and an initial command.";
     };
-    spells = mkOption {
-      type = types.nonEmptyListOf types.str;
-      default = ["summon"];
-      example = ["summon" "/cast"];
-      description = "Case-sensitive triggers, each on its own line outside Markdown quotes and code blocks.";
+    botName = mkOption {
+      type = types.str;
+      default = "invo";
+      example = "my-agent";
+      description = "Bot name without @. Case-insensitive @name mentions outside quotes, code, and links start an agent.";
     };
     agent = mkOption {
       type = types.str;
@@ -130,7 +131,7 @@ in {
     cloneMissing = mkOption {
       type = types.bool;
       default = true;
-      description = "Shallow clone missing checkouts when a spell triggers.";
+      description = "Shallow clone missing checkouts when a bot mention triggers.";
     };
     pollInterval = mkOption {
       type = types.ints.positive;
@@ -186,8 +187,8 @@ in {
         message = "services.invocateur requires Linux systemd user services.";
       }
       {
-        assertion = lib.all (spell: spell != "" && builtins.match "[^\r\n]+" spell != null) cfg.spells;
-        message = "services.invocateur.spells must contain nonempty single-line strings.";
+        assertion = builtins.match "[A-Za-z0-9_-]+" cfg.botName != null;
+        message = "services.invocateur.botName must contain only letters, digits, underscores, or hyphens, without @.";
       }
     ];
 
