@@ -45,7 +45,7 @@
     git_path = lib.getExe pkgs.git;
     command_timeout_seconds = cfg.commandTimeout;
   };
-  configFile = (pkgs.formats.json {}).generate "invocateur.json" settings;
+  configFile = (pkgs.formats.toml {}).generate "invocateur.toml" settings;
 in {
   options.services.invocateur = {
     enable = mkEnableOption "GitHub comment spells that start coding agents in a terminal multiplexer";
@@ -192,7 +192,7 @@ in {
     ];
 
     home.packages = [cfg.package multiplexerPackage];
-    xdg.configFile."invocateur/config.json".source = configFile;
+    xdg.configFile."invocateur/config.toml".source = configFile;
 
     systemd.user.services.invocateur = {
       Unit.Description = "Summon coding agents from GitHub comments";

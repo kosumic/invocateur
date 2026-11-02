@@ -1069,31 +1069,33 @@ fn toml_parse_type_and_unknown_setting_errors_report_the_config_path() {
 }
 
 #[test]
-fn legacy_json_configuration_still_launches_and_acknowledges() {
+fn json_configs_are_rejected_regardless_of_extension_without_starting_work() {
     let f = Fixture::new();
     let cfg: toml::Value =
         toml::from_str(&fs::read_to_string(f.root.join("config.toml")).unwrap()).unwrap();
-    f.write("legacy.json", &serde_json::to_value(cfg).unwrap());
     f.write(
         "issues.json",
         &json!([[Fixture::comment(1, "alice", "summon")]]),
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_invocateur"))
-        .arg("--config")
-        .arg(f.root.join("legacy.json"))
-        .arg("--state-dir")
-        .arg(f.root.join("state"))
-        .arg("--once")
-        .env("FIXTURE", &f.root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(f.launches(), 1);
-    assert_eq!(f.acknowledgements(), 1);
+    for name in ["config.json", "config.toml"] {
+        f.write(name, &serde_json::to_value(&cfg).unwrap());
+        let output = Command::new(env!("CARGO_BIN_EXE_invocateur"))
+            .arg("--config")
+            .arg(f.root.join(name))
+            .arg("--state-dir")
+            .arg(f.root.join("state"))
+            .arg("--once")
+            .env("FIXTURE", &f.root)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "JSON config accepted: {name}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("invalid TOML config"), "{error}");
+        assert!(error.contains(name), "{error}");
+    }
+    assert_eq!(f.launches(), 0);
+    assert_eq!(f.acknowledgements(), 0);
+    assert!(!f.root.join("state").exists());
 }
 
 #[test]

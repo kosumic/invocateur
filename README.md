@@ -42,9 +42,9 @@ checkout paths can be configured with a TOML table (put this after your other se
 ```
 
 TOML supports comments (`#`) and multiline strings, which are useful for custom
-acknowledgements. Existing files with a `.json` extension remain supported for
-compatibility; Home Manager continues to generate JSON automatically. Renaming a
-JSON file to `.toml` does not convert its contents.
+acknowledgements. Configuration is TOML only; Home Manager generates TOML
+from its Nix options automatically. If upgrading from a JSON config, convert its
+contents to TOML and update your service's `--config` path to `config.toml`.
 
 Validate the configuration without contacting GitHub or starting agents:
 
