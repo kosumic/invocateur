@@ -82,8 +82,16 @@ impl Default for Config {
 
 impl Config {
     fn load(path: &Path) -> Result<Self> {
-        let mut cfg: Self = serde_json::from_slice(&fs::read(path)?)
-            .with_context(|| format!("invalid config {}", path.display()))?;
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("cannot read config {}", path.display()))?;
+        // Keep existing and Home Manager-generated JSON configs compatible.
+        let mut cfg: Self = if path.extension().is_some_and(|ext| ext == "json") {
+            serde_json::from_str(&text)
+                .with_context(|| format!("invalid JSON config {}", path.display()))?
+        } else {
+            toml::from_str(&text)
+                .with_context(|| format!("invalid TOML config {}", path.display()))?
+        };
         ensure!(!cfg.spells.is_empty(), "configure at least one spell");
         for template in [&cfg.workspace_name, &cfg.tab_name] {
             ensure!(
@@ -925,7 +933,7 @@ fn main() -> Result<()> {
             "--check-config" => check = true,
             "--help" | "-h" => {
                 println!(
-                    "invocateur --config FILE [--state-dir DIRECTORY] [--once | --check-config]\n\nPoll your GitHub comments and start coding agents in Herdr, tmux, or Zellij. Config format: JSON."
+                    "invocateur --config FILE [--state-dir DIRECTORY] [--once | --check-config]\n\nPoll your GitHub comments and start coding agents in Herdr, tmux, or Zellij. Config format: TOML (legacy .json files are also supported)."
                 );
                 return Ok(());
             }

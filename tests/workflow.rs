@@ -231,13 +231,17 @@ esac
         cfg.as_object_mut()
             .unwrap()
             .extend(overrides.as_object().unwrap().clone());
-        self.write("config.json", &cfg);
+        fs::write(
+            self.root.join("config.toml"),
+            toml::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
     }
     fn command(&self, state: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_invocateur"));
         command
             .arg("--config")
-            .arg(self.root.join("config.json"))
+            .arg(self.root.join("config.toml"))
             .arg("--state-dir")
             .arg(self.root.join(state))
             .arg("--once")
@@ -353,7 +357,7 @@ fn configurable_spell_agent_arguments_directory_and_interval() {
     f.config(json!({"poll_interval_seconds":1, "initial_lookback_seconds":0}));
     let mut child = Command::new(env!("CARGO_BIN_EXE_invocateur"))
         .arg("--config")
-        .arg(f.root.join("config.json"))
+        .arg(f.root.join("config.toml"))
         .arg("--state-dir")
         .arg(f.root.join("daemon-state"))
         .env("FIXTURE", &f.root)
@@ -1003,4 +1007,119 @@ fn explicit_repository_mappings_are_polled_even_without_global_search_results() 
     );
     f.success();
     assert_eq!(f.launches(), 1);
+}
+
+#[test]
+fn toml_comments_literal_strings_tables_and_multiline_acknowledgements_work() {
+    let f = Fixture::new();
+    let path = f.root.join("config.toml");
+    let base = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        format!(
+            r#"# Custom invocation settings; the repository table is below.
+spells = ['abracadabra'] # TOML comments are supported
+agent_args = ['--model', 'example']
+acknowledgement_message = '''
+Working on {{repository}}#{{issue_number}}.
+Agent: {{agent}}
+'''
+{base}"#
+        ),
+    )
+    .unwrap();
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "abracadabra\nFix this")]]),
+    );
+    f.success();
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 1);
+    assert!(
+        fs::read_to_string(f.root.join("ack-1.txt"))
+            .unwrap()
+            .contains("Working on alice/project#42.\nAgent: codex\n")
+    );
+    assert!(
+        fs::read_to_string(f.root.join("start-args"))
+            .unwrap()
+            .contains("--model\nexample")
+    );
+}
+
+#[test]
+fn toml_parse_type_and_unknown_setting_errors_report_the_config_path() {
+    let f = Fixture::new();
+    let path = f.root.join("config.toml");
+    for text in [
+        "spells = [",
+        "poll_interval_seconds = 'sixty'",
+        "poll_intervl_seconds = 60",
+        r#"{"spells":["summon"]}"#,
+    ] {
+        fs::write(&path, text).unwrap();
+        let output = f.command("state").arg("--check-config").output().unwrap();
+        assert!(!output.status.success(), "invalid config accepted: {text}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("invalid TOML config"), "{error}");
+        assert!(error.contains(path.to_str().unwrap()), "{error}");
+    }
+    assert_eq!(f.launches(), 0);
+    assert_eq!(f.acknowledgements(), 0);
+}
+
+#[test]
+fn legacy_json_configuration_still_launches_and_acknowledges() {
+    let f = Fixture::new();
+    let cfg: toml::Value =
+        toml::from_str(&fs::read_to_string(f.root.join("config.toml")).unwrap()).unwrap();
+    f.write("legacy.json", &serde_json::to_value(cfg).unwrap());
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "summon")]]),
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_invocateur"))
+        .arg("--config")
+        .arg(f.root.join("legacy.json"))
+        .arg("--state-dir")
+        .arg(f.root.join("state"))
+        .arg("--once")
+        .env("FIXTURE", &f.root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(f.launches(), 1);
+    assert_eq!(f.acknowledgements(), 1);
+}
+
+#[test]
+fn empty_toml_and_readme_examples_validate_without_external_commands() {
+    let f = Fixture::new();
+    let readme = include_str!("../README.md");
+    let examples = std::iter::once("").chain(
+        readme
+            .split("```toml\n")
+            .skip(1)
+            .map(|section| section.split("```").next().unwrap()),
+    );
+    for text in examples {
+        fs::write(f.root.join("config.toml"), text).unwrap();
+        let output = f
+            .command("state")
+            .arg("--check-config")
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "example: {text}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(f.launches(), 0);
+    assert_eq!(f.acknowledgements(), 0);
 }

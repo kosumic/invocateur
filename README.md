@@ -18,37 +18,45 @@ gh auth login
 mkdir -p ~/.config/invocateur
 ```
 
-Create `~/.config/invocateur/config.json`:
+Create `~/.config/invocateur/config.toml`:
 
-```json
-{
-  "multiplexer": "herdr",
-  "workspace_name": "{repository}#{issue_number} {agent_name}",
-  "tab_name": "{agent_name}",
-  "spells": ["summon"],
-  "agent": "codex",
-  "repos_directory": "~/repos",
-  "poll_interval_seconds": 60,
-  "acknowledgement_message": "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}."
-}
+```toml
+multiplexer = "herdr"
+workspace_name = "{repository}#{issue_number} {agent_name}"
+tab_name = "{agent_name}"
+spells = ["summon"]
+agent = "codex"
+repos_directory = "~/repos"
+poll_interval_seconds = 60
+acknowledgement_message = "🪄 Invocateur started {agent} for this task.\n\nTriggered by {comment_url}."
 ```
 
-These are the defaults; all settings are optional in the JSON file. Standalone
+These are the defaults; all settings are optional in the TOML file. Standalone
 settings use snake_case names, such as `agent_args`, `herdr_session`,
 `initial_lookback_seconds`, and `discover_github_repositories`. Additional
-checkout paths can be configured with `"repositories": {"owner/repo": "~/path"}`.
+checkout paths can be configured with a TOML table (put this after your other settings):
+
+```toml
+[repositories]
+"owner/repo" = "~/path"
+```
+
+TOML supports comments (`#`) and multiline strings, which are useful for custom
+acknowledgements. Existing files with a `.json` extension remain supported for
+compatibility; Home Manager continues to generate JSON automatically. Renaming a
+JSON file to `.toml` does not convert its contents.
 
 Validate the configuration without contacting GitHub or starting agents:
 
 ```bash
-~/.cargo/bin/invocateur --config ~/.config/invocateur/config.json --check-config
+~/.cargo/bin/invocateur --config ~/.config/invocateur/config.toml --check-config
 ```
 
 With the default backend, start Herdr normally and leave its default session
 running, then run Invocateur:
 
 ```bash
-~/.cargo/bin/invocateur --config ~/.config/invocateur/config.json
+~/.cargo/bin/invocateur --config ~/.config/invocateur/config.toml
 ```
 
 Keep this process running to poll for new spell comments. Set `herdr_session`
@@ -70,7 +78,7 @@ Save this as `~/.config/systemd/user/invocateur.service`:
 Description=Summon coding agents from GitHub comments
 
 [Service]
-ExecStart=%h/.cargo/bin/invocateur --config %h/.config/invocateur/config.json
+ExecStart=%h/.cargo/bin/invocateur --config %h/.config/invocateur/config.toml
 Environment="PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
 Restart=on-failure
 RestartSec=15
@@ -90,7 +98,7 @@ systemctl --user enable --now invocateur
 journalctl --user -u invocateur -f
 ```
 
-After editing `config.json`, restart the service:
+After editing `config.toml`, restart the service:
 
 ```bash
 systemctl --user restart invocateur
@@ -101,7 +109,7 @@ foreground command above or configure your operating system's process manager.
 
 ## Multiplexers and names
 
-Set `multiplexer` in JSON or `services.invocateur.multiplexer` in Home Manager:
+Set `multiplexer` in TOML or `services.invocateur.multiplexer` in Home Manager:
 
 | Backend | Session setting / default | Agent location |
 | --- | --- | --- |
@@ -132,7 +140,7 @@ absolute `agent` path); task text is passed literally, without shell expansion.
 Approval and trust dialogs remain interactive. The Zellij backend uses the
 `new-tab --no-focus` initial-command API verified with Zellij 0.45.1.
 
-Configure names using `workspace_name` / `tab_name` in JSON, or `workspaceName` /
+Configure names using `workspace_name` / `tab_name` in TOML, or `workspaceName` /
 `tabName` in Home Manager. Defaults are `{repository}#{issue_number} {agent_name}`
 and `{agent_name}`. Workspace names apply to Herdr; tab names apply to Herdr and
 Zellij tabs or tmux windows. Session names are configured separately.
@@ -140,13 +148,11 @@ Zellij tabs or tmux windows. Session names are configured separately.
 Name templates support `{repository}`, `{issue_number}`, `{agent}`,
 `{agent_name}`, `{comment_id}`, `{multiplexer}`, and `{session}`. For example:
 
-```json
-{
-  "multiplexer": "zellij",
-  "zellij_session": "invocateur",
-  "workspace_name": "{repository} issue {issue_number}",
-  "tab_name": "issue-{issue_number}-{comment_id}"
-}
+```toml
+multiplexer = "zellij"
+zellij_session = "invocateur"
+workspace_name = "{repository} issue {issue_number}"
+tab_name = "issue-{issue_number}-{comment_id}"
 ```
 
 Rendered names must be nonempty, single-line, and at most 256 UTF-8 bytes. The
@@ -216,7 +222,7 @@ new comment on the issue or PR. The default message is:
 Triggered by https://github.com/owner/repo/issues/42#issuecomment-123.
 ```
 
-Customize it with `acknowledgement_message` in JSON or
+Customize it with `acknowledgement_message` in TOML or
 `services.invocateur.acknowledgementMessage` in Home Manager. The nonempty message
 supports `{agent}`, `{comment_url}`, `{repository}`, `{issue_number}`,
 `{multiplexer}`, and `{session}`. You can
@@ -326,12 +332,12 @@ journalctl --user -u invocateur -f
 ## Standalone CLI options
 
 The package and reusable module are exported as `packages.<system>.invocateur`
-and `homeManagerModules.default`. The standalone binary accepts JSON settings
+and `homeManagerModules.default`. The standalone binary accepts TOML settings
 with snake_case names, with the same defaults as the module:
 
 ```bash
-nix run github:kosumic/invocateur -- --config /path/to/config.json --check-config
-nix run github:kosumic/invocateur -- --config /path/to/config.json --once
+nix run github:kosumic/invocateur -- --config /path/to/config.toml --check-config
+nix run github:kosumic/invocateur -- --config /path/to/config.toml --once
 ```
 
 `--once` performs one poll without sleeping. `--check-config` validates settings
@@ -340,13 +346,11 @@ directory. Use a separate state directory for manual checks while the service ru
 Launch records also retain the acknowledgement URL or acknowledgement error;
 `claimed-elsewhere` means the shared GitHub reaction was already present.
 
-```json
-{
-  "spells": ["summon"],
-  "agent": "codex",
-  "repos_directory": "~/repos",
-  "poll_interval_seconds": 60
-}
+```toml
+spells = ["summon"]
+agent = "codex"
+repos_directory = "~/repos"
+poll_interval_seconds = 60
 ```
 
 ## Design references
