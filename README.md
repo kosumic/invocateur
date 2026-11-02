@@ -4,6 +4,97 @@ A Rust daemon and Home Manager systemd user service. It polls GitHub through you
 local authenticated `gh` CLI and starts a coding agent in a background Herdr
 workspace when **you** post a configured spell.
 
+## Install without Nix
+
+Install a current stable Rust toolchain (Cargo), a C compiler/linker, Git,
+[GitHub CLI](https://cli.github.com/), [Herdr](https://herdr.dev/), and the coding
+agent you want to use. The agent executable must be available to the Herdr server.
+
+Install Invocateur and authenticate with GitHub:
+
+```bash
+cargo install --locked --git https://github.com/kosumic/invocateur
+gh auth login
+mkdir -p ~/.config/invocateur
+```
+
+Create `~/.config/invocateur/config.json`:
+
+```json
+{
+  "spells": ["summon"],
+  "agent": "codex",
+  "repos_directory": "~/repos",
+  "poll_interval_seconds": 60
+}
+```
+
+These are the defaults; all settings are optional in the JSON file. Standalone
+settings use snake_case names, such as `agent_args`, `herdr_session`,
+`initial_lookback_seconds`, and `discover_github_repositories`. Additional
+checkout paths can be configured with `"repositories": {"owner/repo": "~/path"}`.
+
+Validate the configuration without contacting GitHub or starting agents:
+
+```bash
+~/.cargo/bin/invocateur --config ~/.config/invocateur/config.json --check-config
+```
+
+Start Herdr normally, leave its default session running, then run Invocateur:
+
+```bash
+~/.cargo/bin/invocateur --config ~/.config/invocateur/config.json
+```
+
+Keep this process running to poll for new spell comments. Set `herdr_session`
+if you use a different existing Herdr session. Invocateur does not start Herdr.
+
+### Run as a systemd user service on Linux
+
+Create the unit directory:
+
+```bash
+mkdir -p ~/.config/systemd/user
+```
+
+Save this as `~/.config/systemd/user/invocateur.service`:
+
+```ini
+[Unit]
+Description=Summon coding agents from GitHub comments
+
+[Service]
+ExecStart=%h/.cargo/bin/invocateur --config %h/.config/invocateur/config.json
+Environment="PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Restart=on-failure
+RestartSec=15
+UMask=0077
+
+[Install]
+WantedBy=default.target
+```
+
+The executable path assumes the default Cargo installation directory. Adjust
+`ExecStart` and `PATH` if Invocateur, `gh`, Git, or Herdr are installed elsewhere.
+Stop any foreground Invocateur instance before enabling the service:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now invocateur
+journalctl --user -u invocateur -f
+```
+
+After editing `config.json`, restart the service:
+
+```bash
+systemctl --user restart invocateur
+```
+
+Keep Herdr running when using the service. On Unix systems without systemd, use the
+foreground command above or configure your operating system's process manager.
+
+## Install with Nix and Home Manager
+
 Import `invocateur.homeManagerModules.default` in your Home Manager configuration
 and enable `services.invocateur`. The systemd user service requires Linux.
 
@@ -48,6 +139,8 @@ available to the polling service and defaults to `[ pkgs.codex ]`.
 Log in with `gh auth login`, and start Herdr normally before using the service.
 The default Herdr session is `default`; set `herdrSession` to target another
 already running session. The daemon does not start or restart Herdr itself.
+
+## Usage and behavior
 
 Post a comment on an issue, PR conversation, or inline PR review:
 
@@ -110,6 +203,8 @@ systemctl --user status invocateur
 journalctl --user -u invocateur -f
 ```
 
+## Standalone CLI options
+
 The package and reusable module are exported as `packages.<system>.invocateur`
 and `homeManagerModules.default`. The standalone binary accepts JSON settings
 with snake_case names, with the same defaults as the module:
@@ -132,7 +227,7 @@ directory. Use a separate state directory for manual checks while the service ru
 }
 ```
 
-Development checks:
+## Development
 
 ```bash
 nix develop
