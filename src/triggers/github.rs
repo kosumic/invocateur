@@ -542,10 +542,10 @@ fn discover_github(
 }
 
 // Match mentions only where CommonMark recognizes ordinary, unquoted text.
-fn task(body: &str, bot_name: &str) -> Option<String> {
+fn has_mention(body: &str, bot_name: &str) -> bool {
     // A custom acknowledgement can itself mention the bot. Never summon from it.
     if body.trim_start().starts_with("<!-- invocateur:ack:") {
-        return None;
+        return false;
     }
     let mut suppressed = 0;
     let mut text_ranges = vec![];
@@ -574,7 +574,7 @@ fn task(body: &str, bot_name: &str) -> Option<String> {
                         html[offset + tag.len()..]
                             .starts_with(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
                     }) {
-                        return None;
+                        return false;
                     }
                 }
             }
@@ -618,8 +618,6 @@ fn task(body: &str, bot_name: &str) -> Option<String> {
 
     let mention = format!("@{}", bot_name.to_ascii_lowercase());
     let lower = body.to_ascii_lowercase();
-    let mut instruction = String::new();
-    let mut cursor = 0;
     for (start, _) in lower.match_indices(&mention) {
         let end = start + mention.len();
         let before = body[..start].chars().next_back();
@@ -635,15 +633,10 @@ fn task(body: &str, bot_name: &str) -> Option<String> {
                 .any(|range| range.start <= start && end <= range.end)
             && !quoted_ranges.iter().any(|range| range.contains(&start))
         {
-            instruction.push_str(&body[cursor..start]);
-            cursor = end;
+            return true;
         }
     }
-    if cursor == 0 {
-        return None;
-    }
-    instruction.push_str(&body[cursor..]);
-    Some(instruction.trim().to_owned())
+    false
 }
 
 fn issue_number(comment: &Comment) -> Result<u64> {
@@ -657,15 +650,6 @@ fn issue_number(comment: &Comment) -> Result<u64> {
         .context("missing issue number")?
         .parse()
         .context("invalid issue number")
-}
-
-fn excerpt(text: &str) -> &str {
-    // Bound bytes, not characters, so even Unicode-heavy prompts fit Linux's argv limit.
-    let mut end = text.len().min(24_000);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 fn poll_repo(
@@ -713,26 +697,17 @@ fn poll_repo(
         {
             continue;
         }
-        let Some(instruction) = task(comment.body.as_deref().unwrap_or(""), &client.0.bot_name)
-        else {
+        if !has_mention(comment.body.as_deref().unwrap_or(""), &client.0.bot_name) {
             continue;
-        };
+        }
         let number = issue_number(&comment)?;
-        let issue: Value = client.gh(&format!("repos/{repo}/issues/{number}"), false)?;
         // Readiness is checked before reserving: an unavailable server can safely be retried.
         multiplexer::ensure_ready(client.0)?;
         client.checkout(repo, directory)?;
         let name = format!("gh-{id}");
         let (workspace_name, tab_name) =
             multiplexer::names(client.0, repo, number, &name, comment.id)?;
-        let prompt = format!(
-            "Work on GitHub issue or pull request {repo}#{number}.\nComment: {}\n\nTitle: {}\n\nIssue/PR description:\n{}\n\nInstructions from {login}:\n{}\n\nFollow the repository's AGENTS.md instructions. Mention {repo}#{number} in any commit you make.\n\n{}",
-            comment.html_url,
-            excerpt(issue["title"].as_str().unwrap_or("")),
-            excerpt(issue["body"].as_str().unwrap_or("")),
-            excerpt(&instruction),
-            crate::schedule_instructions(state_file.parent().unwrap())
-        );
+        let prompt = format!("Work on it: {}", comment.html_url);
         state.repositories.get_mut(&key).unwrap().launches.insert(
             id.clone(),
             Launch {

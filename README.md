@@ -304,9 +304,10 @@ handles such as `@invo-other` do not match. A fresh unquoted mention after a
 Markdown quote still works. Comments containing
 raw HTML `<blockquote>` or `<q>` containers are ignored entirely. Only comments from
 the account returned by `gh api user` are accepted. Issue/PR descriptions and
-review summary bodies are not triggers. The agent receives the issue/PR title,
-description, comment link, and the rest of your comment as its task; each text
-section is limited to 24,000 UTF-8 bytes.
+review summary bodies are not triggers. The agent receives only `Work on it:`
+followed by the triggering comment's link. It reads the issue or PR and your
+instructions from GitHub; Invo does not fetch or paste the title, description,
+or comment text into the launch prompt.
 
 The service searches for your recently updated conversations and reviews across
 GitHub and inspects their repositories. Set `discoverGithubRepositories = false`

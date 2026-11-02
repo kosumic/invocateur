@@ -319,13 +319,6 @@ fn render_template(template: &str, values: &[(&str, &str)]) -> String {
         .collect()
 }
 
-fn schedule_instructions(directory: &Path) -> String {
-    format!(
-        "When the user requests scheduling, manage persistent schedules through invo schedule --help (create, list, get, update, delete). This service's state directory is {}. Supply it using --state-dir before schedule when needed. Changes take effect without restarting the service.",
-        directory.display()
-    )
-}
-
 fn main() -> Result<()> {
     let mut config_path = None;
     let mut state_dir = None;

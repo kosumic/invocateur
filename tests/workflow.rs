@@ -114,7 +114,6 @@ for arg do
       if test -f "$FIXTURE/ack-lost-response"; then echo 'connection lost after comment' >&2; exit 1; fi
       printf '{"html_url":"https://github.com/alice/project/issues/42#issuecomment-ack-%s"}' "$count"
       exit 0 ;;
-    repos/alice/project/issues/42) printf '{"title":"Fix the bug","body":"Issue context"}'; exit 0 ;;
   esac
 done
 echo "unexpected gh request: $*" >&2
@@ -333,9 +332,9 @@ fn own_mentions_only_paginated_and_deduplicated_across_restarts() {
     f.success();
     assert_eq!(f.launches(), 1);
     let prompt = fs::read_to_string(f.root.join("prompts")).unwrap();
-    assert!(
-        prompt.contains("Issue context")
-            && prompt.contains("Fix this; $(touch /tmp/never) `literal`\nwith a second line")
+    assert_eq!(
+        prompt,
+        "Work on it: https://github.com/alice/project/issues/42#issuecomment-6\n"
     );
     let start = fs::read_to_string(f.root.join("start-args")).unwrap();
     assert!(start.contains("codex") && start.contains("w7:p9"));
@@ -424,6 +423,7 @@ fn inline_review_comments_and_edits_can_summon() {
     let mut review = Fixture::comment(1, "alice", "@invo\nFix this line");
     review.as_object_mut().unwrap().remove("issue_url");
     review["pull_request_url"] = json!("https://api.github.com/repos/alice/project/pulls/42");
+    review["html_url"] = json!("https://github.com/alice/project/pull/42#discussion_r1");
     f.write("reviews.json", &json!([[review]]));
     f.success();
     f.success();
@@ -433,6 +433,16 @@ fn inline_review_comments_and_edits_can_summon() {
         "issue and review comment IDs must be independent"
     );
     assert_eq!(f.acknowledgements(), 2);
+    let prompts = fs::read_to_string(f.root.join("prompts")).unwrap();
+    let mut prompts: Vec<_> = prompts.lines().collect();
+    prompts.sort_unstable();
+    assert_eq!(
+        prompts,
+        [
+            "Work on it: https://github.com/alice/project/issues/42#issuecomment-1",
+            "Work on it: https://github.com/alice/project/pull/42#discussion_r1"
+        ]
+    );
 }
 
 #[test]
@@ -789,11 +799,13 @@ fn an_unquoted_mention_after_a_quote_or_example_still_summons() {
     f.success();
     assert_eq!(f.launches(), bodies.len());
     assert_eq!(f.acknowledgements(), bodies.len());
-    assert!(
-        fs::read_to_string(f.root.join("prompts"))
-            .unwrap()
-            .contains("Fix the actual issue.")
-    );
+    let prompts = fs::read_to_string(f.root.join("prompts")).unwrap();
+    let expected: String = (100..100 + bodies.len())
+        .map(|id| {
+            format!("Work on it: https://github.com/alice/project/issues/42#issuecomment-{id}\n")
+        })
+        .collect();
+    assert_eq!(prompts, expected);
 }
 
 #[test]
@@ -860,7 +872,10 @@ fn tmux_and_zellij_launch_native_agents_with_literal_arguments_and_names() {
             &argv[..3],
             ["--model", "a model with spaces", "literal ' \" $HOME ;"]
         );
-        assert!(argv.last().unwrap().contains(&task));
+        assert_eq!(
+            *argv.last().unwrap(),
+            "Work on it: https://github.com/alice/project/issues/42#issuecomment-1"
+        );
         let cwd = fs::read_to_string(f.root.join("agent-cwd")).unwrap();
         assert_eq!(
             fs::canonicalize(cwd.trim()).unwrap(),
