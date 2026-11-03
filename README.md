@@ -341,7 +341,7 @@ including private repositories accessible through your `gh` login.
 On first seeing a repository the daemon processes future comment updates only.
 Set `initialLookback = 3600` to include the previous hour for newly watched
 repositories. Subsequent restarts resume the saved cursor, including downtime.
-Polling uses a five-minute overlap for delayed API visibility. Editing a comment
+Polling uses a one-hour overlap for delayed API visibility. Editing a comment
 to add a bot mention can trigger it, but each comment is dispatched at most once,
 even if edited again.
 

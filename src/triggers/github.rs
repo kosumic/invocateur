@@ -13,6 +13,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+// Revisit delayed GitHub search results and comments using the same window.
+const POLL_OVERLAP: TimeDelta = TimeDelta::hours(1);
+
 pub struct GithubTrigger<'a> {
     cfg: &'a Config,
     state_file: PathBuf,
@@ -510,7 +513,7 @@ fn discover_github(
     let not_before = account.not_before;
     let cursor = account.cursor;
     save(state_file, state)?;
-    let since = (cursor - TimeDelta::minutes(5)).to_rfc3339_opts(SecondsFormat::Secs, true);
+    let since = (cursor - POLL_OVERLAP).to_rfc3339_opts(SecondsFormat::Secs, true);
     let mut repositories = BTreeSet::new();
     for qualifier in ["commenter", "reviewed-by"] {
         if qualifier == "reviewed-by" && !client.0.review_comments {
@@ -548,7 +551,7 @@ fn discover_github(
             .entry(repo_key(client, login, repo))
             .or_insert_with(|| RepoState {
                 not_before,
-                cursor: std::cmp::max(not_before, cursor - TimeDelta::minutes(5)),
+                cursor: std::cmp::max(not_before, cursor - POLL_OVERLAP),
                 launches: BTreeMap::new(),
                 conversations: BTreeMap::new(),
             });
@@ -731,8 +734,8 @@ fn poll_repo(
     });
     save(state_file, state)?;
     // Overlap catches same-second updates and delayed GitHub visibility; IDs provide deduplication.
-    let since = (state.repositories[&key].cursor - TimeDelta::minutes(5))
-        .to_rfc3339_opts(SecondsFormat::Secs, true);
+    let since =
+        (state.repositories[&key].cursor - POLL_OVERLAP).to_rfc3339_opts(SecondsFormat::Secs, true);
     let mut comments = vec![];
     for (kind, endpoint) in [("i", "issues/comments"), ("r", "pulls/comments")] {
         if kind == "r" && !client.0.review_comments {

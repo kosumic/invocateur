@@ -76,8 +76,29 @@ for arg do
         exit 1
       fi
       printf '{"login":"alice"}'; exit 0 ;;
-    search/issues\?*) cat "$FIXTURE/search.json"; exit 0 ;;
-    repos/alice/project/issues/comments\?*) cat "$FIXTURE/issues.json"; exit 0 ;;
+    search/issues\?*)
+      if test -f "$FIXTURE/visible-since"; then
+        since="${arg#*updated%3A%3E%3D}"
+        since="${since%%&*}"
+        since=$(printf '%s' "$since" | sed 's/%3A/:/g')
+        read -r cutoff < "$FIXTURE/visible-since"
+        earliest=$(printf '%s\n%s\n' "$since" "$cutoff" | sort | head -n 1)
+        if test "$earliest" != "$since"; then
+          printf '[{"total_count":0,"incomplete_results":false,"items":[]}]'
+          exit 0
+        fi
+      fi
+      cat "$FIXTURE/search.json"; exit 0 ;;
+    repos/alice/project/issues/comments\?*)
+      if test -f "$FIXTURE/visible-since"; then
+        since="${arg#*since=}"
+        since="${since%%&*}"
+        since=$(printf '%s' "$since" | sed 's/%3A/:/g')
+        read -r cutoff < "$FIXTURE/visible-since"
+        earliest=$(printf '%s\n%s\n' "$since" "$cutoff" | sort | head -n 1)
+        if test "$earliest" != "$since"; then printf '[[]]'; exit 0; fi
+      fi
+      cat "$FIXTURE/issues.json"; exit 0 ;;
     repos/alice/project/pulls/comments\?*)
       if test -f "$FIXTURE/api-fails"; then echo 'rate limited' >&2; exit 1; fi
       cat "$FIXTURE/reviews.json"; exit 0 ;;
@@ -541,6 +562,38 @@ fn comments_across_github_discover_and_clone_new_repositories() {
         clones.lines().collect::<Vec<_>>(),
         [f.root.join("repos/alice/project").to_str().unwrap()]
     );
+}
+
+#[test]
+fn delayed_visibility_within_one_hour_is_dispatched_once() {
+    for discover in [false, true] {
+        let f = Fixture::new();
+        f.config(json!({
+            "repositories": if discover { json!({}) } else {
+                json!({"alice/project":f.root.join("checkout")})
+            },
+            "discover_github_repositories": discover,
+            "initial_lookback_seconds": 7200,
+            "repos_directory":f.root.join("repos")
+        }));
+        f.success(); // GitHub has not indexed the comment yet; advance the cursor.
+        let delayed = Utc::now() - Duration::minutes(30);
+        let timestamp = delayed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        fs::write(f.root.join("visible-since"), format!("{timestamp}\n")).unwrap();
+        f.write(
+            "search.json",
+            &json!([{"total_count":1,"incomplete_results":false,"items":[
+                {"repository_url":"https://api.github.com/repos/alice/project"}
+            ]}]),
+        );
+        let mut comment = Fixture::comment(1, "alice", "@invo Implement the fix");
+        comment["updated_at"] = json!(timestamp);
+        f.write("issues.json", &json!([[comment]]));
+        f.success();
+        f.success();
+        assert_eq!(f.launches(), 1, "global discovery: {discover}");
+        assert_eq!(f.acknowledgements(), 1);
+    }
 }
 
 #[test]
