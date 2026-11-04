@@ -329,7 +329,7 @@ fn own_mentions_only_paginated_and_deduplicated_across_restarts() {
     assert!(start.contains("codex") && start.contains("w7:p9"));
     assert_eq!(
         fs::read_to_string(f.root.join("tab-names")).unwrap(),
-        "gh-i-6\n"
+        "issue-6\n"
     );
     assert!(
         fs::read_to_string(f.root.join("workspace-args"))

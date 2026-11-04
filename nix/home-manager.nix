@@ -73,7 +73,7 @@ in {
     };
     tabName = mkOption {
       type = types.str;
-      default = "{agent_name}";
+      default = "issue-{comment_id}";
       description = "Herdr tab name template, with the same placeholders as workspaceName.";
     };
     package = mkOption {

@@ -61,7 +61,7 @@ impl Default for Config {
             schedule_check_interval_seconds: 1,
             multiplexer: Multiplexer::Herdr,
             workspace_name: "{repository}#{issue_number} {agent_name}".into(),
-            tab_name: "{agent_name}".into(),
+            tab_name: "issue-{comment_id}".into(),
             bot_name: "invo".into(),
             use_hostname_as_bot_name: false,
             agent: "codex".into(),

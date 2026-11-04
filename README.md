@@ -25,7 +25,7 @@ Create `~/.config/invocateur/config.toml`:
 ```toml
 multiplexer = "herdr"
 workspace_name = "{repository}#{issue_number} {agent_name}"
-tab_name = "{agent_name}"
+tab_name = "issue-{comment_id}"
 bot_name = "invo"
 use_hostname_as_bot_name = false
 agent = "codex"
@@ -127,7 +127,8 @@ arguments. Approval and trust dialogs remain interactive.
 
 Configure names using `workspace_name` / `tab_name` in TOML, or `workspaceName` /
 `tabName` in Home Manager. Defaults are `{repository}#{issue_number} {agent_name}`
-and `{agent_name}`. They name new Herdr workspaces and tabs.
+and `issue-{comment_id}`. They name new Herdr workspaces and tabs. The default
+tab name uses the triggering comment ID, for example `issue-123`.
 
 Name templates support `{repository}`, `{issue_number}`, `{agent}`,
 `{agent_name}`, `{comment_id}`, `{multiplexer}` (always `herdr`), and `{session}`.
@@ -168,7 +169,7 @@ services.invocateur = {
   enable = true;
   multiplexer = "herdr";
   workspaceName = "{repository}#{issue_number} {agent_name}";
-  tabName = "{agent_name}";
+  tabName = "issue-{comment_id}";
   botName = "invo";
   useHostnameAsBotName = false;
   agent = "codex";
