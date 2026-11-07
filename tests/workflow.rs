@@ -30,7 +30,11 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join("checkout/.git")).unwrap();
-        let f = Self { root };
+        // macOS temporary paths can traverse /var -> /private/var. Compare
+        // working directories using the same physical path a child observes.
+        let f = Self {
+            root: root.canonicalize().unwrap(),
+        };
         f.write("issues.json", &json!([[]]));
         f.write("reviews.json", &json!([[]]));
         f.write(

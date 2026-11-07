@@ -22,6 +22,8 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
+    env:
+      RUST_BACKTRACE: 1
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -54,7 +56,7 @@ jobs:
         run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
 
       - name: Test behavior with simulated CLIs
-        run: nix develop -c cargo test --locked
+        run: nix develop -c cargo test --locked -- --nocapture
 
       - name: Build Nix package
         run: nix build --print-build-logs
