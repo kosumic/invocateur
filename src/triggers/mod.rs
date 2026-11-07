@@ -2,6 +2,7 @@
 use anyhow::{Result, ensure};
 use std::time::{Duration, Instant};
 
+pub mod ci;
 pub mod github;
 pub mod schedule;
 

@@ -17,12 +17,15 @@ mod cli;
 mod multiplexer;
 mod triggers;
 use multiplexer::Multiplexer;
-use triggers::github::valid_repo;
+use triggers::github::valid_repo_reference;
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Config {
     github_enabled: bool,
+    ci_repositories: Vec<String>,
+    ci_branches: Vec<String>,
+    ci_poll_interval_seconds: u64,
     api_enabled: bool,
     api_listen: String,
     schedule_check_interval_seconds: u64,
@@ -56,6 +59,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             github_enabled: true,
+            ci_repositories: vec![],
+            ci_branches: vec!["main".into(), "master".into(), "dev".into()],
+            ci_poll_interval_seconds: 60,
             api_enabled: true,
             api_listen: "127.0.0.1:7639".into(),
             schedule_check_interval_seconds: 1,
@@ -151,11 +157,29 @@ impl Config {
                     .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b)),
             "invalid GitHub hostname"
         );
+        ensure!(
+            cfg.ci_poll_interval_seconds > 0,
+            "CI poll interval must be positive"
+        );
+        for repo in &cfg.ci_repositories {
+            ensure!(
+                valid_repo_reference(repo),
+                "invalid CI repository {repo}: expected name or owner/name"
+            );
+        }
+        ensure!(
+            !cfg.ci_branches.is_empty()
+                && cfg
+                    .ci_branches
+                    .iter()
+                    .all(|branch| !branch.is_empty() && !branch.chars().any(char::is_control)),
+            "ci_branches must contain nonempty branch names without control characters"
+        );
         cfg.repos_directory = expand_home(&cfg.repos_directory)?;
         for (repo, path) in &mut cfg.repositories {
             ensure!(
-                valid_repo(repo),
-                "invalid repository {repo}: expected owner/name"
+                valid_repo_reference(repo),
+                "invalid repository {repo}: expected name or owner/name"
             );
             *path = expand_home(path)?;
         }
@@ -336,7 +360,7 @@ fn main() -> Result<()> {
             "--check-config" => check = true,
             "--help" | "-h" => {
                 println!(
-                    "invo serve --config FILE [--state-dir DIRECTORY] [--once | --check-config]\ninvo schedule --help\n\nRun GitHub comment triggers and scheduled agent or command tasks. Config format: TOML."
+                    "invo serve --config FILE [--state-dir DIRECTORY] [--once | --check-config]\ninvo schedule --help\n\nRun GitHub comment and CI triggers and scheduled agent or command tasks. Config format: TOML."
                 );
                 return Ok(());
             }
@@ -349,6 +373,7 @@ fn main() -> Result<()> {
         if cfg.github_enabled {
             println!("GitHub trigger: @{}", cfg.bot_name);
         }
+        println!("CI trigger: {} repositories", cfg.ci_repositories.len());
         println!(
             "Schedule API: {} ({})",
             cfg.api_listen,
@@ -379,6 +404,12 @@ fn main() -> Result<()> {
         active_triggers.push(triggers::Registration::new(
             Box::new(triggers::github::GithubTrigger::new(&cfg, &state_dir)?),
             Duration::from_secs(cfg.poll_interval_seconds),
+        ));
+    }
+    if !cfg.ci_repositories.is_empty() {
+        active_triggers.push(triggers::Registration::new(
+            Box::new(triggers::ci::CiTrigger::new(&cfg, &state_dir)?),
+            Duration::from_secs(cfg.ci_poll_interval_seconds),
         ));
     }
     let schedule_store = std::sync::Arc::new(triggers::schedule::Store::open(&cfg, &state_dir)?);

@@ -89,6 +89,19 @@ for arg do
         fi
       fi
       cat "$FIXTURE/search.json"; exit 0 ;;
+    repos/alice/project/branches\?*)
+      cat "$FIXTURE/branches.json"; exit 0 ;;
+    repos/alice/project/actions/runs\?*)
+      printf '%s\n' "$arg" >> "$FIXTURE/ci-requests"
+      if test -f "$FIXTURE/ci-api-fails"; then echo 'rate limited' >&2; exit 1; fi
+      cat "$FIXTURE/runs.json"; exit 0 ;;
+    repos/alice/project/issues)
+      test "$method" = POST || exit 2
+      printf 'issue\n' >> "$FIXTURE/created-issues"
+      printf '%s' "$body" > "$FIXTURE/ci-issue-body"
+      if test -f "$FIXTURE/issue-lost-response"; then echo 'connection lost after issue' >&2; exit 1; fi
+      printf '{"number":81,"html_url":"https://github.com/alice/project/issues/81"}'
+      exit 0 ;;
     repos/alice/project/issues/comments\?*)
       if test -f "$FIXTURE/visible-since"; then
         since="${arg#*since=}"
@@ -323,7 +336,7 @@ fn own_mentions_only_paginated_and_deduplicated_across_restarts() {
     let prompt = fs::read_to_string(f.root.join("prompts")).unwrap();
     assert_eq!(
         prompt,
-        "Work on it: https://github.com/alice/project/issues/42#issuecomment-6\n\nWhen posting a new comment on GitHub, start its body with \"gh-i-6:\".\n"
+        "Work on it: https://github.com/alice/project/issues/42#issuecomment-6\n\nWhen posting a new comment on GitHub, start its body with \"i-6:\".\n"
     );
     let start = fs::read_to_string(f.root.join("start-args")).unwrap();
     assert!(start.contains("codex") && start.contains("w7:p9"));
@@ -334,7 +347,7 @@ fn own_mentions_only_paginated_and_deduplicated_across_restarts() {
     assert!(
         fs::read_to_string(f.root.join("workspace-args"))
             .unwrap()
-            .contains("alice/project#42 gh-i-6")
+            .contains("alice/project#42 i-6")
     );
     assert_eq!(f.acknowledgements(), 1);
     let ack = fs::read_to_string(f.root.join("ack-1.txt")).unwrap();
@@ -447,9 +460,9 @@ fn inline_review_comments_and_edits_can_summon() {
         prompts,
         concat!(
             "Work on it: https://github.com/alice/project/issues/42#issuecomment-1\n\n",
-            "When posting a new comment on GitHub, start its body with \"gh-i-1:\".\n",
+            "When posting a new comment on GitHub, start its body with \"i-1:\".\n",
             "Work on it: https://github.com/alice/project/pull/42#discussion_r1\n\n",
-            "When posting a new comment on GitHub, start its body with \"gh-i-1:\".\n"
+            "When posting a new comment on GitHub, start its body with \"i-1:\".\n"
         )
     );
 }
@@ -843,7 +856,7 @@ fn an_unquoted_mention_after_a_quote_or_example_still_summons() {
     let prompts = fs::read_to_string(f.root.join("prompts")).unwrap();
     let expected: String = (100..100 + bodies.len())
         .map(|id| {
-            format!("Work on it: https://github.com/alice/project/issues/42#issuecomment-{id}\n\nWhen posting a new comment on GitHub, start its body with \"gh-i-100:\".\n")
+            format!("Work on it: https://github.com/alice/project/issues/42#issuecomment-{id}\n\nWhen posting a new comment on GitHub, start its body with \"i-100:\".\n")
         })
         .collect();
     assert_eq!(prompts, expected);
@@ -868,12 +881,12 @@ fn herdr_workspace_and_tab_names_are_configurable_templates() {
     );
     assert_eq!(
         fs::read_to_string(f.root.join("tab-names")).unwrap(),
-        "codex-gh-i-1-1-herdr-test-session\n"
+        "codex-i-1-1-herdr-test-session\n"
     );
     let state = f.state();
     let record = &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-1"];
     assert_eq!(record["workspace_name"], "Work on alice/project#42");
-    assert_eq!(record["tab_name"], "codex-gh-i-1-1-herdr-test-session");
+    assert_eq!(record["tab_name"], "codex-i-1-1-herdr-test-session");
 }
 
 #[test]
@@ -1844,9 +1857,9 @@ fn follow_up_mentions_reuse_the_running_agent_across_restarts_and_pane_moves() {
     );
     f.success();
     f.write(
-        "live-agents/gh-i-1.json",
+        "live-agents/i-1.json",
         &json!({
-            "name":"gh-i-1","agent":"codex","agent_status":"working","pane_id":"w8:p2"
+            "name":"i-1","agent":"codex","agent_status":"working","pane_id":"w8:p2"
         }),
     );
     f.write(
@@ -1869,22 +1882,22 @@ fn follow_up_mentions_reuse_the_running_agent_across_restarts_and_pane_moves() {
     assert_eq!(f.acknowledgements(), 2);
     assert_eq!(
         fs::read_to_string(f.root.join("prompt-targets")).unwrap(),
-        "gh-i-1\ngh-i-1\n"
+        "i-1\ni-1\n"
     );
     let prompt = fs::read_to_string(f.root.join("prompts")).unwrap();
     assert_eq!(prompt.matches("Work on it:").count(), 2);
     assert!(prompt.contains(
-        "#issuecomment-2\n\nWhen posting a new comment on GitHub, start its body with \"gh-i-1:\"."
+        "#issuecomment-2\n\nWhen posting a new comment on GitHub, start its body with \"i-1:\"."
     ));
     assert!(!prompt.contains("Also update the docs"));
     let ack = fs::read_to_string(f.root.join("ack-2.txt")).unwrap();
     assert!(ack.contains(
-        "[Invocateur](https://github.com/kosumic/invocateur) forwarded this comment to gh-i-1."
+        "[Invocateur](https://github.com/kosumic/invocateur) forwarded this comment to i-1."
     ));
     let state = f.state();
     let record = &state["repositories"]["github.com/alice/alice/project"]["launches"]["i-2"];
     assert_eq!(record["status"], "forwarded");
-    assert_eq!(record["agent"], "gh-i-1");
+    assert_eq!(record["agent"], "i-1");
     assert_eq!(record["pane"], "w8:p2");
 }
 
@@ -1907,9 +1920,9 @@ fn follow_ups_keep_different_issue_agents_separate_and_replace_exited_agents() {
     assert_eq!(f.launches(), 2);
     assert_eq!(
         fs::read_to_string(f.root.join("prompt-targets")).unwrap(),
-        "gh-i-1\ngh-i-2\ngh-i-1\n"
+        "i-1\ni-2\ni-1\n"
     );
-    fs::remove_file(f.root.join("live-agents/gh-i-1.json")).unwrap();
+    fs::remove_file(f.root.join("live-agents/i-1.json")).unwrap();
     f.write(
         "issues.json",
         &json!([[Fixture::comment(4, "alice", "@invo Restart this task")]]),
@@ -1919,7 +1932,7 @@ fn follow_ups_keep_different_issue_agents_separate_and_replace_exited_agents() {
     assert!(
         fs::read_to_string(f.root.join("prompt-targets"))
             .unwrap()
-            .ends_with("gh-i-4\n")
+            .ends_with("i-4\n")
     );
 }
 
@@ -1941,7 +1954,7 @@ fn legacy_launch_state_recovers_conversations_without_forgetting_old_backend_cla
     let mut historical = repo["launches"]["i-1"].clone();
     historical["multiplexer"] = json!("tmux");
     historical["pane"] = json!("%7");
-    historical["agent"] = json!("gh-i-9");
+    historical["agent"] = json!("i-9");
     repo["launches"]["i-9"] = historical;
     f.write("state/state.json", &state);
     f.write(
@@ -1956,7 +1969,7 @@ fn legacy_launch_state_recovers_conversations_without_forgetting_old_backend_cla
     assert_eq!(f.acknowledgements(), 2);
     assert_eq!(
         fs::read_to_string(f.root.join("prompt-targets")).unwrap(),
-        "gh-i-1\ngh-i-1\n"
+        "i-1\ni-1\n"
     );
     assert_eq!(
         f.state()["repositories"]["github.com/alice/alice/project"]["launches"]["i-9"]["multiplexer"],
@@ -1967,14 +1980,14 @@ fn legacy_launch_state_recovers_conversations_without_forgetting_old_backend_cla
 #[test]
 fn blocked_unknown_or_malformed_agent_reads_defer_follow_ups_without_claiming_them() {
     let replies = [
-        json!({"result":{"agents":[{"name":"gh-i-1","agent":"codex","agent_status":"blocked","pane_id":"w7:p9"}]}}),
-        json!({"result":{"agents":[{"name":"gh-i-1","agent":"codex","agent_status":"unknown","pane_id":"w7:p9"}]}}),
-        json!({"result":{"agents":[{"name":"gh-i-1","agent":"codex","agent_status":"idle","pane_id":"bad-pane"}]}}),
-        json!({"result":{"agents":[{"name":"gh-i-1","agent":"codex","agent_status":"idle","launch_pending":true,"pane_id":"w7:p9"}]}}),
-        json!({"result":{"agents":[{"name":"gh-i-1","agent":null,"agent_status":"idle","pane_id":"w7:p9"}]}}),
+        json!({"result":{"agents":[{"name":"i-1","agent":"codex","agent_status":"blocked","pane_id":"w7:p9"}]}}),
+        json!({"result":{"agents":[{"name":"i-1","agent":"codex","agent_status":"unknown","pane_id":"w7:p9"}]}}),
+        json!({"result":{"agents":[{"name":"i-1","agent":"codex","agent_status":"idle","pane_id":"bad-pane"}]}}),
+        json!({"result":{"agents":[{"name":"i-1","agent":"codex","agent_status":"idle","launch_pending":true,"pane_id":"w7:p9"}]}}),
+        json!({"result":{"agents":[{"name":"i-1","agent":null,"agent_status":"idle","pane_id":"w7:p9"}]}}),
         json!({"result":{"agents":[
-            {"name":"gh-i-1","agent":"codex","agent_status":"idle","pane_id":"w7:p9"},
-            {"name":"gh-i-1","agent":"codex","agent_status":"idle","pane_id":"w8:p2"}
+            {"name":"i-1","agent":"codex","agent_status":"idle","pane_id":"w7:p9"},
+            {"name":"i-1","agent":"codex","agent_status":"idle","pane_id":"w8:p2"}
         ]}}),
         json!({"result":{"agents":"not-a-list"}}),
         json!({"result":{}}),
@@ -2082,7 +2095,7 @@ fn simultaneous_follow_ups_with_shared_history_are_delivered_and_acknowledged_on
     assert_eq!(f.acknowledgements(), 2);
     assert_eq!(
         fs::read_to_string(f.root.join("prompt-targets")).unwrap(),
-        "gh-i-1\ngh-i-1\n"
+        "i-1\ni-1\n"
     );
 }
 
@@ -2100,7 +2113,7 @@ fn follow_up_acknowledgements_and_prefix_instructions_remain_configurable() {
     );
     f.success();
     let ack = fs::read_to_string(f.root.join("ack-2.txt")).unwrap();
-    assert!(ack.contains("to gh-i-1 in test-session"));
+    assert!(ack.contains("to i-1 in test-session"));
     f.write(
         "issues.json",
         &json!([[Fixture::comment(3, "alice", &ack)]]),
@@ -2144,9 +2157,9 @@ fn herdr_base32_ids_allow_launches_and_follow_ups_after_restart() {
             .contains("wM:pA9")
     );
     f.write(
-        "live-agents/gh-i-1.json",
+        "live-agents/i-1.json",
         &json!({
-            "name":"gh-i-1","agent":"codex","agent_status":"done","pane_id":"w0A:pZ0"
+            "name":"i-1","agent":"codex","agent_status":"done","pane_id":"w0A:pZ0"
         }),
     );
     f.write(
@@ -2163,6 +2176,278 @@ fn herdr_base32_ids_allow_launches_and_follow_ups_after_restart() {
     assert_eq!(record["pane"], "w0A:pZ0");
     assert_eq!(
         fs::read_to_string(f.root.join("prompt-targets")).unwrap(),
-        "gh-i-1\ngh-i-1\n"
+        "i-1\ni-1\n"
     );
+}
+
+fn ci_fixture(branch: &str, sha: &str) -> Fixture {
+    let f = Fixture::new();
+    f.config(json!({
+        "github_enabled": false,
+        "ci_repositories": ["alice/project"],
+        "repos_directory": f.root.join("repos")
+    }));
+    f.write(
+        "branches.json",
+        &json!([[{"name":branch,"commit":{"sha":sha}}]]),
+    );
+    f.write("runs.json", &json!([{"workflow_runs":[]} ]));
+    f
+}
+
+fn ci_run(id: u64, branch: &str, sha: &str, conclusion: &str) -> Value {
+    json!({"id":id,"workflow_id":7,"name":"Build and test", "head_sha":sha,
+        "head_branch":branch,"event":"push","status":"completed","conclusion":conclusion,
+        "html_url":format!("https://github.com/alice/project/actions/runs/{id}")})
+}
+
+fn ci_issue_count(f: &Fixture) -> usize {
+    fs::read_to_string(f.root.join("created-issues"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+#[test]
+fn ci_branch_tip_failures_create_one_issue_and_launch_once_across_restarts() {
+    let sha = "a".repeat(40);
+    for branch in ["main", "master", "dev"] {
+        let f = ci_fixture(branch, &sha);
+        f.write(
+            "runs.json",
+            &json!([{"workflow_runs":[ci_run(9,branch,&sha,"failure")]}]),
+        );
+        f.success();
+        f.success();
+        assert_eq!(ci_issue_count(&f), 1);
+        assert_eq!(f.launches(), 1);
+        let body = fs::read_to_string(f.root.join("ci-issue-body")).unwrap();
+        assert!(body.contains(&sha) && body.contains(branch));
+        assert!(body.contains("https://github.com/alice/project/actions/runs/9"));
+        let prompt = fs::read_to_string(f.root.join("prompts")).unwrap();
+        for required in [
+            "issues/81",
+            branch,
+            &sha,
+            "simple, well-understood fix",
+            "push without creating a new PR",
+            "Mention #81",
+            "verify CI",
+            "close the issue once resolved",
+        ] {
+            assert!(prompt.contains(required), "missing {required}: {prompt}");
+        }
+        let request = fs::read_to_string(f.root.join("ci-requests")).unwrap();
+        assert!(request.contains(&format!("branch={branch}&head_sha={sha}")));
+        let starts = fs::read_to_string(f.root.join("start-args")).unwrap();
+        assert!(starts.contains("ci-alice-project-81") && !starts.contains("gh-"));
+    }
+}
+
+#[test]
+fn ci_ignores_stale_commits_pr_runs_other_branches_and_nonfailures() {
+    let sha = "a".repeat(40);
+    let f = ci_fixture("main", &sha);
+    let mut runs = vec![
+        ci_run(1, "main", &"b".repeat(40), "failure"),
+        ci_run(2, "dev", &sha, "failure"),
+    ];
+    for event in ["pull_request", "pull_request_target", "merge_group"] {
+        let mut run = ci_run(3, "main", &sha, "failure");
+        run["event"] = json!(event);
+        runs.push(run);
+    }
+    for conclusion in ["success", "cancelled", "skipped", "neutral", "stale"] {
+        let mut run = ci_run(4, "main", &sha, conclusion);
+        run["workflow_id"] = json!(runs.len() + 10);
+        runs.push(run);
+    }
+    let mut queued = ci_run(5, "main", &sha, "failure");
+    queued["status"] = json!("queued");
+    runs.push(queued);
+    f.write("runs.json", &json!([{"workflow_runs":runs}]));
+    f.success();
+    assert_eq!(ci_issue_count(&f), 0);
+    assert_eq!(f.launches(), 0);
+    // An unregistered branch is not queried, even when it has a failed run.
+    f.write(
+        "branches.json",
+        &json!([[{"name":"feature","commit":{"sha":sha}}]]),
+    );
+    fs::remove_file(f.root.join("ci-requests")).unwrap();
+    f.success();
+    assert!(!f.root.join("ci-requests").exists());
+}
+
+#[test]
+fn ci_uses_newest_workflow_run_across_pages_and_repolls_pending_commits() {
+    let sha = "a".repeat(40);
+    let f = ci_fixture("main", &sha);
+    // Ordering does not change which run wins; a pending replacement suppresses
+    // the older failed run until its final result arrives.
+    let mut queued = ci_run(20, "main", &sha, "failure");
+    queued["status"] = json!("in_progress");
+    f.write(
+        "runs.json",
+        &json!([
+            {"workflow_runs":[ci_run(10,"main",&sha,"failure")]},
+            {"workflow_runs":[queued]}
+        ]),
+    );
+    f.success();
+    assert_eq!(ci_issue_count(&f), 0);
+    f.write(
+        "runs.json",
+        &json!([
+            {"workflow_runs":[ci_run(20,"main",&sha,"success")]},
+            {"workflow_runs":[ci_run(10,"main",&sha,"failure")]}
+        ]),
+    );
+    f.success();
+    assert_eq!(ci_issue_count(&f), 0);
+    let mut other = ci_run(21, "main", &sha, "timed_out");
+    other["workflow_id"] = json!(8);
+    f.write(
+        "runs.json",
+        &json!([
+            {"workflow_runs":[ci_run(20,"main",&sha,"success")]},
+            {"workflow_runs":[other]}
+        ]),
+    );
+    f.success();
+    assert_eq!(ci_issue_count(&f), 1);
+    assert_eq!(f.launches(), 1);
+    let body = fs::read_to_string(f.root.join("ci-issue-body")).unwrap();
+    assert!(body.contains("/runs/21") && !body.contains("/runs/10"));
+}
+
+#[test]
+fn ci_only_watches_registered_repositories_and_can_clone_a_missing_checkout() {
+    let sha = "a".repeat(40);
+    let f = ci_fixture("main", &sha);
+    f.config(json!({
+        "github_enabled":false,"ci_repositories":["ALICE/PROJECT","alice/project"],
+        "repositories":{},"repos_directory": f.root.join("repos")
+    }));
+    f.write(
+        "runs.json",
+        &json!([{"workflow_runs":[ci_run(1,"main",&sha,"action_required")]}]),
+    );
+    f.success();
+    assert_eq!(ci_issue_count(&f), 1);
+    assert_eq!(f.launches(), 1);
+    assert!(f.root.join("repos/alice/project/.git").is_dir());
+    let clones = fs::read_to_string(f.root.join("clones")).unwrap();
+    assert_eq!(clones.lines().count(), 1);
+    // Turning off CI leaves comment polling functional and does not query CI.
+    let plain = Fixture::new();
+    plain.success();
+    assert!(!plain.root.join("ci-requests").exists());
+}
+
+#[test]
+fn ci_readiness_and_api_failures_can_be_retried_before_mutations() {
+    let sha = "a".repeat(40);
+    for failure in ["ci-api-fails", "server-down"] {
+        let f = ci_fixture("main", &sha);
+        f.write(
+            "runs.json",
+            &json!([{"workflow_runs":[ci_run(1,"main",&sha,"failure")]}]),
+        );
+        fs::write(f.root.join(failure), "").unwrap();
+        assert!(!f.run().status.success());
+        assert_eq!(ci_issue_count(&f), 0);
+        assert_eq!(f.launches(), 0);
+        fs::remove_file(f.root.join(failure)).unwrap();
+        f.success();
+        assert_eq!(ci_issue_count(&f), 1);
+        assert_eq!(f.launches(), 1);
+    }
+}
+
+#[test]
+fn ci_ambiguous_issue_or_launch_failures_never_duplicate_mutations() {
+    let sha = "a".repeat(40);
+    for failure in ["issue-lost-response", "prompt-lost-response"] {
+        let f = ci_fixture("main", &sha);
+        f.write(
+            "runs.json",
+            &json!([{"workflow_runs":[ci_run(1,"main",&sha,"failure")]}]),
+        );
+        fs::write(f.root.join(failure), "").unwrap();
+        assert!(!f.run().status.success());
+        let launches = f.launches();
+        fs::remove_file(f.root.join(failure)).unwrap();
+        f.success();
+        assert_eq!(ci_issue_count(&f), 1);
+        assert_eq!(f.launches(), launches);
+    }
+}
+
+#[test]
+fn ci_custom_branches_and_configuration_validation_are_observable() {
+    let sha = "a".repeat(40);
+    let f = ci_fixture("release/stable", &sha);
+    f.config(json!({"github_enabled":false,"ci_repositories":["alice/project"],"ci_branches":["release/stable"]}));
+    f.write(
+        "runs.json",
+        &json!([{"workflow_runs":[ci_run(1,"release/stable",&sha,"failure")]}]),
+    );
+    f.success();
+    assert_eq!(ci_issue_count(&f), 1);
+    assert!(
+        fs::read_to_string(f.root.join("ci-requests"))
+            .unwrap()
+            .contains("branch=release%2Fstable")
+    );
+    for invalid in [
+        json!({"ci_repositories":["bad/repo/name"]}),
+        json!({"ci_branches":[]}),
+        json!({"ci_branches":[""]}),
+        json!({"ci_branches":["two\nlines"]}),
+        json!({"ci_poll_interval_seconds":0}),
+    ] {
+        let f = Fixture::new();
+        f.config(invalid);
+        assert!(!f.run().status.success());
+        assert_eq!(ci_issue_count(&f), 0);
+        assert_eq!(f.launches(), 0);
+    }
+    fs::write(f.root.join("state/ci-state.json"), "broken").unwrap();
+    let output = f.run();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to forget"));
+}
+
+#[test]
+fn ownerless_ci_and_checkout_names_use_the_authenticated_gh_account() {
+    let sha = "a".repeat(40);
+    let f = ci_fixture("main", &sha);
+    f.config(json!({
+        "github_enabled":false,
+        "ci_repositories":["project", "ALICE/PROJECT"],
+        "repositories":{"project":f.root.join("checkout")}
+    }));
+    f.write(
+        "runs.json",
+        &json!([{"workflow_runs":[ci_run(1,"main",&sha,"failure")]}]),
+    );
+    f.success();
+    f.success();
+    assert_eq!(ci_issue_count(&f), 1);
+    assert_eq!(f.launches(), 1);
+    assert!(!f.root.join("clones").exists());
+    assert!(
+        fs::read_to_string(f.root.join("ci-requests"))
+            .unwrap()
+            .contains("repos/alice/project/")
+    );
+    // The same ownerless mapping works for explicit comment-trigger polling.
+    f.config(json!({"repositories":{"project":f.root.join("checkout")}}));
+    f.write(
+        "issues.json",
+        &json!([[Fixture::comment(1, "alice", "@invo")]]),
+    );
+    f.success();
+    assert_eq!(f.launches(), 2);
 }

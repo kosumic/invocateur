@@ -4,8 +4,76 @@ The CLI command is `invo`.
 
 A Rust daemon that polls GitHub through your local authenticated `gh` CLI and
 starts a coding agent in **Herdr** when you post a
-configured bot mention. It also runs scheduled coding-agent prompts and commands.
+configured bot mention. It can also monitor registered repositories for CI failures
+and run scheduled coding-agent prompts and commands.
 A Home Manager module provides a systemd user service.
+
+## CI failure monitoring
+
+Register repositories explicitly to opt in. A repository name without an owner
+uses the authenticated account returned by `gh api user`; explicit `owner/repo`
+entries work for other owners. Checkout path mappings also accept ownerless names. Add these top-level TOML settings
+before any tables:
+
+```toml
+ci_repositories = ["repo", "another-repo", "other-owner/shared-repo"]
+ci_branches = ["main", "master", "dev"] # default; missing branches are skipped
+ci_poll_interval_seconds = 60
+
+[repositories]
+"owner/repo" = "~/repos/repo" # optional checkout path override
+```
+
+The Home Manager equivalents are:
+
+```nix
+services.invocateur = {
+  ciRepositories = ["repo"];
+  ciBranches = ["main" "master" "dev"];
+  ciPollInterval = 60;
+  repositories."owner/repo" = "~/repos/repo";
+};
+```
+
+CI polling is independent of `github_enabled` / `githubEnabled` and comment
+polling. The default empty repository list disables it. Discovered repositories
+are only a checkout catalog; CI monitoring requires explicit registration.
+Checkouts use the configured path mapping or an existing discovered checkout;
+otherwise they are shallow-cloned under `repos_directory/owner/repo` when needed,
+subject to `clone_missing`.
+
+Invocateur checks GitHub Actions runs for the **current branch-tip SHA**. It
+selects the newest run for each workflow and event across all response pages,
+ignores PR and merge-queue runs, and handles completed `failure`, `timed_out`,
+and `action_required` conclusions. Successful, pending, skipped, and cancelled
+runs do not trigger work. An older failure superseded by a newer successful or
+pending run is ignored. See the [GitHub workflow runs API](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository)
+for the branch and commit filters. External CI providers are not monitored.
+
+A failure creates one issue per repository, branch, and commit, with links to the
+failed runs, and starts the configured agent in Herdr. Its prompt instructs it to
+read the logs, verify the latest branch state, and comment that it is working on
+the issue. For a simple fix, it should validate the change, commit with the issue
+number, push directly to the affected branch **without a new PR**, verify CI,
+comment with the result, and close the resolved issue. Complex fixes or protected
+branches use a PR referencing the issue. Existing local changes must be preserved.
+
+Use a `gh` account with Actions and Contents read access and Issues write access;
+the agent also needs permission to push its fix. Start the configured Herdr
+session before enabling monitoring. CI does not require a mention or an issue
+author check: the explicit repository list authorizes these automatic tasks.
+
+Deduplication lives in `ci-state.json` in the service state directory, scoped by
+GitHub host, authenticated account, repository, branch, and SHA. Reservations are
+saved before issue creation and agent dispatch. A crash or ambiguous mutation
+failure is left for inspection rather than automatically replayed; inspect
+GitHub, Herdr, and that state file before manually retrying. Keep one CI-monitoring
+instance per registered repository to avoid duplicate issues across independent
+state directories. No live agents or GitHub mutations are used by the tests.
+
+New comment-triggered agents use names such as `i-123` and `r-456`, without a
+`gh-` prefix; CI agents use `ci-owner-repo-81`. Herdr displays these shorter agent
+names in its tabs. Workspace and tab templates remain configurable.
 
 ## Install without Nix
 
@@ -288,7 +356,7 @@ the account returned by `gh api user` are accepted. Issue/PR descriptions and
 review summary bodies are not triggers. The agent receives `Work on it:`
 followed by the triggering comment's link, plus an instruction to start any new
 GitHub comment with its agent instance name and a colon (for example,
-`gh-i-123: Working on it.`). This identity instruction also applies to scheduled
+`i-123: Working on it.`). This identity instruction also applies to scheduled
 agents, using each launch's own agent name. It is
 independent of the bot mention, agent program, and configurable workspace/tab names.
 The agent reads the issue or PR and your instructions from GitHub; Invo does not
@@ -367,7 +435,7 @@ mentions to address the machine that owns the agent.
 After forwarding, the default acknowledgement is:
 
 ```text
-↪️ [Invocateur](https://github.com/kosumic/invocateur) forwarded this comment to gh-i-123.
+↪️ [Invocateur](https://github.com/kosumic/invocateur) forwarded this comment to i-123.
 
 Triggered by https://github.com/owner/repo/issues/42#issuecomment-456.
 ```
@@ -519,8 +587,8 @@ future work and its stored history; it does not cancel an agent already running.
 The service schedules triggers through the `Trigger` interface in
 [`src/triggers/mod.rs`](src/triggers/mod.rs). Each trigger owns its prerequisite
 checks, state, and task dispatch; task types are not restricted by the scheduler.
-Built-in triggers are [GitHub](src/triggers/github.rs) and
-[scheduled tasks](src/triggers/schedule.rs). Future triggers can implement
+Built-in triggers are [GitHub comments](src/triggers/github.rs),
+[CI failures](src/triggers/ci.rs), and [scheduled tasks](src/triggers/schedule.rs). Future triggers can implement
 this interface for other sources and tasks without depending on GitHub or `gh`.
 
 If `gh` is missing or its authenticated account cannot be verified, the GitHub

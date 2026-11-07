@@ -9,6 +9,9 @@
   settings = {
     inherit (cfg) agent repositories multiplexer;
     github_enabled = cfg.githubEnabled;
+    ci_repositories = cfg.ciRepositories;
+    ci_branches = cfg.ciBranches;
+    ci_poll_interval_seconds = cfg.ciPollInterval;
     schedule_check_interval_seconds = cfg.scheduleCheckInterval;
     api_enabled = cfg.apiEnabled;
     api_listen = cfg.apiListen;
@@ -30,7 +33,7 @@
     herdr_session = cfg.herdrSession;
     github_host = cfg.githubHost;
     gh_path =
-      if cfg.githubEnabled
+      if cfg.githubEnabled || cfg.ciRepositories != []
       then lib.getExe pkgs.gh
       else "gh";
     herdr_path = lib.getExe cfg.herdrPackage;
@@ -45,6 +48,22 @@ in {
       type = types.bool;
       default = true;
       description = "Enable the GitHub comment trigger. Disable for schedules without GitHub.";
+    };
+    ciRepositories = mkOption {
+      type = types.listOf types.str;
+      default = [];
+      example = ["repo" "owner/another-repo"];
+      description = "Repositories whose latest branch commits are monitored for CI failures. Names without an owner use the authenticated gh account. Uses repositories path mappings or reposDirectory/owner/repo. Independent of githubEnabled.";
+    };
+    ciBranches = mkOption {
+      type = types.listOf types.str;
+      default = ["main" "master" "dev"];
+      description = "Branches to monitor in ciRepositories. Branches that do not exist are skipped.";
+    };
+    ciPollInterval = mkOption {
+      type = types.ints.positive;
+      default = 60;
+      description = "Seconds between CI polls, independent of comment and schedule polling.";
     };
     scheduleCheckInterval = mkOption {
       type = types.ints.positive;
@@ -128,7 +147,7 @@ in {
       type = types.attrsOf types.str;
       default = {};
       example = {"kosumi/nixpkgs" = "~/nixpkgs";};
-      description = "Additional owner/repo to local checkout mappings. These override discovered paths.";
+      description = "Additional name or owner/repo to local checkout mappings. Names without an owner use the authenticated gh account. These override discovered paths.";
     };
     discoverRepositories = mkOption {
       type = types.bool;
@@ -208,7 +227,7 @@ in {
         WorkingDirectory = config.home.homeDirectory;
         Environment = [
           "XDG_CONFIG_HOME=${config.xdg.configHome}"
-          "PATH=${lib.makeBinPath ([pkgs.git] ++ lib.optional cfg.githubEnabled pkgs.gh ++ [cfg.herdrPackage] ++ cfg.extraPackages)}:${config.home.profileDirectory}/bin:${config.home.homeDirectory}/.local/bin:${config.home.homeDirectory}/.nix-profile/bin:/run/current-system/sw/bin"
+          "PATH=${lib.makeBinPath ([pkgs.git] ++ lib.optional (cfg.githubEnabled || cfg.ciRepositories != []) pkgs.gh ++ [cfg.herdrPackage] ++ cfg.extraPackages)}:${config.home.profileDirectory}/bin:${config.home.homeDirectory}/.local/bin:${config.home.homeDirectory}/.nix-profile/bin:/run/current-system/sw/bin"
         ];
       };
       Install.WantedBy = ["default.target"];

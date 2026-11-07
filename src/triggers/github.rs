@@ -70,14 +70,14 @@ impl Trigger for GithubTrigger<'_> {
             .repositories
             .keys()
             .chain(pending.iter())
-            .map(|repo| repo.to_ascii_lowercase())
+            .map(|repo| resolve_repo(repo, &user.login).to_ascii_lowercase())
             .collect();
         // In global mode local checkouts are a path catalog, not an API polling list.
         // Avoid scanning the catalog altogether while there is no pending or explicit work.
         let mut repos = if cfg.discover_github_repositories && watched.is_empty() {
             BTreeMap::new()
         } else {
-            client.repositories()?
+            client.repositories(&user.login)?
         };
         if cfg.discover_github_repositories {
             for repo in &pending {
@@ -123,6 +123,18 @@ impl Trigger for GithubTrigger<'_> {
     }
 }
 
+pub(crate) fn valid_repo_reference(repo: &str) -> bool {
+    valid_repo(repo) || valid_repo(&format!("owner/{repo}"))
+}
+
+pub(super) fn resolve_repo(repo: &str, login: &str) -> String {
+    if repo.contains('/') {
+        repo.to_owned()
+    } else {
+        format!("{login}/{repo}")
+    }
+}
+
 pub(crate) fn valid_repo(repo: &str) -> bool {
     let parts: Vec<_> = repo.split('/').collect();
     parts.len() == 2
@@ -149,11 +161,11 @@ fn repo_from_remote(remote: &str, host: &str) -> Option<String> {
     valid_repo(repo).then(|| repo.to_owned())
 }
 
-struct Client<'a>(&'a Config);
+pub(super) struct Client<'a>(pub(super) &'a Config);
 impl Client<'_> {
     // The authenticated user endpoint handles stored credentials and GH_TOKEN alike.
     // Keep prerequisite failures inside this trigger so the scheduler can run others.
-    fn authenticated_user(&self) -> Result<User> {
+    pub(super) fn authenticated_user(&self) -> Result<User> {
         self.gh("user", false).map_err(|error| {
             let missing = error.chain().any(|cause| {
                 cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
@@ -169,7 +181,7 @@ impl Client<'_> {
         })
     }
 
-    fn gh_post(
+    pub(super) fn gh_post(
         &self,
         endpoint: &str,
         fields: &[(&str, &str)],
@@ -286,7 +298,7 @@ impl Client<'_> {
             .context("GitHub acknowledgement response has no URL")
     }
 
-    fn gh<T: DeserializeOwned>(&self, endpoint: &str, paginated: bool) -> Result<T> {
+    pub(super) fn gh<T: DeserializeOwned>(&self, endpoint: &str, paginated: bool) -> Result<T> {
         let mut argv = args(&[
             "api",
             "--hostname",
@@ -316,7 +328,7 @@ impl Client<'_> {
         repo_from_remote(&output, &self.0.github_host)
             .context("origin is not a supported GitHub remote")
     }
-    fn repositories(&self) -> Result<BTreeMap<String, PathBuf>> {
+    pub(super) fn repositories(&self, login: &str) -> Result<BTreeMap<String, PathBuf>> {
         let mut repos = BTreeMap::new();
         if self.0.discover_repositories && self.0.repos_directory.is_dir() {
             // Support both ~/repos/name and ~/repos/owner/name, including worktrees (.git files).
@@ -347,10 +359,15 @@ impl Client<'_> {
                 }
             }
         }
-        repos.extend(self.0.repositories.clone());
+        repos.extend(
+            self.0
+                .repositories
+                .iter()
+                .map(|(repo, path)| (resolve_repo(repo, login), path.clone())),
+        );
         Ok(repos)
     }
-    fn checkout(&self, repo: &str, directory: &Path) -> Result<()> {
+    pub(super) fn checkout(&self, repo: &str, directory: &Path) -> Result<()> {
         if !directory.exists() {
             ensure!(
                 self.0.clone_missing,
@@ -433,7 +450,7 @@ struct Launch {
     tab_name: Option<String>,
 }
 
-fn save(path: &Path, state: &State) -> Result<()> {
+pub(super) fn save(path: &Path, state: &impl Serialize) -> Result<()> {
     let temp = path.with_extension("json.tmp");
     let mut file = File::create(&temp)?;
     file.write_all(&serde_json::to_vec_pretty(state)?)?;
@@ -444,8 +461,8 @@ fn save(path: &Path, state: &State) -> Result<()> {
 }
 
 #[derive(Deserialize)]
-struct User {
-    login: String,
+pub(super) struct User {
+    pub(super) login: String,
 }
 #[derive(Deserialize)]
 struct Comment {
@@ -481,7 +498,7 @@ fn repo_key(client: &Client<'_>, login: &str, repo: &str) -> String {
     )
 }
 
-fn percent_encode(value: &str) -> String {
+pub(super) fn percent_encode(value: &str) -> String {
     value
         .bytes()
         .map(|byte| {
@@ -773,7 +790,7 @@ fn poll_repo(
         let name = existing
             .as_ref()
             .map(|agent| agent.name.clone())
-            .unwrap_or_else(|| format!("gh-{id}"));
+            .unwrap_or_else(|| id.clone());
         let (workspace_name, tab_name) = if forwarded {
             (None, None)
         } else {
