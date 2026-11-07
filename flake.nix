@@ -44,6 +44,8 @@
           gh
           git
           alejandra
+          actionlint
+          shellcheck
         ];
       };
     });

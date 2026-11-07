@@ -629,3 +629,41 @@ nix build .#invocateur
 The [multiplexer adapter contracts](docs/multiplexers.md) describe the typed
 request/response boundary, native identifier validation, error handling, and
 durable launch checkpoints.
+
+## Continuous integration and dependency updates
+
+The [CI workflow](.github/workflows/ci.yml) uses the flake development environment
+on x86-64 Linux, ARM64 Linux, and Apple Silicon macOS. Every push to main, master,
+or dev and every pull request runs formatting, strict Clippy, behavioral tests,
+and the Nix package build. Workflow changes are checked with Actionlint. The
+simulated CLIs in the tests do not contact GitHub or launch real agents.
+
+Actions are pinned to commit SHAs. CI has read-only repository access, job
+timeouts, and cancellation of superseded runs. Rust build caches are saved only
+from pushes to main. Public pull requests also receive dependency review, which
+rejects newly introduced vulnerabilities of moderate severity or higher.
+
+[Dependabot](.github/dependabot.yml) checks Cargo and GitHub Actions dependencies
+weekly on Monday, with a one-day cooldown for version updates. Compatible Cargo
+updates and Actions updates are grouped; Cargo security updates have their own
+group. Major Cargo upgrades remain separate PRs. Dependabot's default automatic
+rebasing is retained. Nix inputs are pinned by flake.lock and updated separately.
+
+The [merge workflow](.github/workflows/dependabot-auto-merge.yml) squash-merges
+Dependabot PRs only after the complete CI workflow succeeds, including dependency
+review. It checks the current author, repository, branch, state, and tested head
+SHA, then uses GitHub's head-SHA precondition to reject concurrent changes. The
+privileged merge job never checks out or executes pull request code. Other PRs
+are left for manual review.
+
+These practices are adapted to this Rust daemon from the workflow conventions in
+[Whip](https://github.com/kosumic/whip/tree/main/.github). Run the same checks locally:
+
+```bash
+nix develop -c cargo fmt --check
+nix develop -c alejandra --check .
+nix develop -c actionlint
+nix develop -c cargo clippy --locked --all-targets -- -D warnings
+nix develop -c cargo test --locked
+nix build
+```

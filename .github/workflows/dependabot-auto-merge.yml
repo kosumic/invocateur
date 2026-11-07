@@ -1,0 +1,48 @@
+name: Dependabot auto-merge
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-merge-${{ github.event.workflow_run.pull_requests[0].number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    name: Merge tested Dependabot update
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.pull_requests[0].number
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # This privileged job uses API metadata only; it never checks out PR code.
+      - name: Verify and merge the tested revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          TESTED_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
+        run: |
+          pull_request=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+          eligible=$(jq -r --arg sha "$TESTED_SHA" --arg repo "$GITHUB_REPOSITORY" '
+            .user.login == "dependabot[bot]" and
+            .state == "open" and .draft == false and
+            .head.sha == $sha and
+            .head.repo.full_name == $repo and
+            .base.repo.full_name == $repo and .base.ref == "main"
+          ' <<< "$pull_request")
+          if [[ "$eligible" != true ]]; then
+            echo "Skipping PR #$PR_NUMBER: author, state, repository, or tested revision changed"
+            exit 0
+          fi
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --match-head-commit "$TESTED_SHA" --squash --delete-branch
